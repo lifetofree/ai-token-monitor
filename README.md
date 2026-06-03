@@ -48,7 +48,7 @@ When running in **Real RTK Monitor Mode**, the Node.js server polls the local SQ
 
 ## ⚙️ Features & Architecture
 
-* **Multi-Brand Support**: Customized pricing rates and budgets for Gemini, Antigravity, Claude, Minimax, and GLM.
+* **Multi-Brand Support**: Customized pricing rates and budgets for Gemini, Claude, Minimax, and GLM.
 * **Dual-Mode Operation**:
   * **Simulation Mode**: Generates mock organic background API requests for local layout and logic testing.
   * **Real RTK Mode**: Connects to the local RTK SQLite history database to parse actual LLM commands run via the command-line hook.
