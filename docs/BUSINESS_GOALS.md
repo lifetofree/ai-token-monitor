@@ -47,6 +47,19 @@ A single developer (the project author) using multiple LLM Brands on one machine
 - Per-Request drill-down view (currently only aggregates are shown)
 - SQLite/JSON persistence for Request history across server restarts (currently `localStorage` only)
 - Re-introduction of Real RTK mode (superseded by `../docs/adr/0005-remove-real-rtk-mode.md`)
+- Real-Mode Precise Brand Attribution (New Vision): Fix the brand detection bug in real usage by logging the client brand directly in the SQLite database during command execution.
+
+## 📈 Real-Mode Brand Detection & Attribution (SQLite Schema Extension)
+
+### Business Context & Problem
+In the previous implementation of Real RTK Mode, the dashboard used a client-side heuristic (`detectBrand`) that scanned command strings (e.g. `git status`) for keywords like "gemini" or "rtk". If no keyword was found, it defaulted to "claude". Consequently, in real usage, standard developer commands executed under Gemini or other assistants were incorrectly cataloged under "claude" or "antigravity".
+
+To display correct data for each brand in real usage, the system must precisely identify the calling LLM client at the source.
+
+### The Solution Vision
+1. **Database Schema Extension**: Introduce a `brand` column in the SQLite `commands` table of `history.db` to store the active brand string (`gemini`, `claude`, `minimax`, `glm`, `antigravity`).
+2. **Hook Attribution**: Since `rtk` intercepts calls using tool-specific hook subcommands (`rtk hook claude`, `rtk hook gemini`), the `rtk` binary must log the corresponding brand into the `brand` column of the database automatically when logging the command.
+3. **Dashboard Consumption**: The `/api/rtk` endpoint and the client-side rendering engine should read the logged `brand` value directly, completely replacing the fragile command-text regex heuristic.
 
 ## Success criteria
 

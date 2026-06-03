@@ -1,7 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 
 const PORT = 3000;
 const STATIC_ROOT = path.resolve(__dirname);
@@ -16,6 +16,10 @@ const MIME_TYPES = {
 };
 
 const homeDir = process.env.HOME || '/Users/lifetofree';
+const DB_PATH = process.env.RTK_DB_PATH || path.join(homeDir, 'Library/Application Support/rtk/history.db');
+
+let sseClients = [];
+let lastSeenDbId = 0;
 
 // Mask secrets before sending to the browser — never expose full keys in JS memory/DOM.
 function maskSecret(val) {
@@ -36,6 +40,65 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
     res.end();
+    return;
+  }
+
+  // API Endpoint: Get RTK Database Commands (all records)
+  if (req.method === 'GET' && req.url === '/api/rtk') {
+    const query = "SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms FROM commands ORDER BY timestamp ASC";
+
+    execFile('sqlite3', ['-json', DB_PATH, query], (error, stdout) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (error) {
+        res.end(JSON.stringify({ error: error.message, commands: [] }));
+        return;
+      }
+      try {
+        const parsed = stdout.trim() ? JSON.parse(stdout) : [];
+        res.end(JSON.stringify({ commands: parsed }));
+      } catch (e) {
+        res.end(JSON.stringify({ error: 'Parse failed', commands: [], raw: stdout }));
+      }
+    });
+    return;
+  }
+
+  // API Endpoint: Get aggregate summary from RTK DB (matches `rtk gain` output)
+  if (req.method === 'GET' && req.url === '/api/rtk/summary') {
+    const query = "SELECT COUNT(*) as total_commands, COALESCE(SUM(input_tokens),0) as total_input, COALESCE(SUM(output_tokens),0) as total_output, COALESCE(SUM(saved_tokens),0) as total_saved, COALESCE(SUM(exec_time_ms),0) as total_exec_ms FROM commands";
+
+    execFile('sqlite3', ['-json', DB_PATH, query], (error, stdout) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (error) {
+        res.end(JSON.stringify({ error: error.message }));
+        return;
+      }
+      try {
+        const rows = stdout.trim() ? JSON.parse(stdout) : [{}];
+        res.end(JSON.stringify(rows[0] || {}));
+      } catch (e) {
+        res.end(JSON.stringify({ error: 'Parse failed' }));
+      }
+    });
+    return;
+  }
+
+  // API Endpoint: Server-Sent Events stream for Real-Time updates
+  if (req.method === 'GET' && req.url === '/api/rtk/stream') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+    
+    // Heartbeat handshake
+    res.write('data: {"status":"connected"}\n\n');
+    sseClients.push(res);
+    
+    req.on('close', () => {
+      sseClients = sseClients.filter(c => c !== res);
+    });
     return;
   }
 
@@ -187,8 +250,56 @@ const server = http.createServer((req, res) => {
   });
 });
 
+function initWatcher() {
+  // Sync the lastSeenDbId on startup to prevent broadcasting past history
+  const query = "SELECT id FROM commands ORDER BY id DESC LIMIT 1";
+  execFile('sqlite3', ['-json', DB_PATH, query], (error, stdout) => {
+    if (!error && stdout.trim()) {
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed.length > 0) {
+          lastSeenDbId = parsed[0].id;
+        }
+      } catch (e) {}
+    }
+  });
+
+  const dbDir = path.dirname(DB_PATH);
+  let watchTimeout = null;
+
+  if (fs.existsSync(dbDir)) {
+    fs.watch(dbDir, (eventType, filename) => {
+      if (filename && filename.startsWith('history.db')) {
+        // Debounce database read by 100ms to allow SQLite write locks to release
+        if (watchTimeout) clearTimeout(watchTimeout);
+        watchTimeout = setTimeout(checkForNewCommands, 100);
+      }
+    });
+  }
+}
+
+function checkForNewCommands() {
+  const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms FROM commands WHERE id > ${lastSeenDbId} ORDER BY id ASC`;
+  execFile('sqlite3', ['-json', DB_PATH, query], (error, stdout) => {
+    if (error || !stdout.trim()) return;
+    try {
+      const parsed = JSON.parse(stdout);
+      if (parsed.length > 0) {
+        parsed.forEach(cmd => {
+          lastSeenDbId = Math.max(lastSeenDbId, cmd.id);
+          const payload = JSON.stringify(cmd);
+          sseClients.forEach(client => {
+            client.write(`data: ${payload}\n\n`);
+          });
+        });
+      }
+    } catch (e) {}
+  });
+}
+
 server.listen(PORT, () => {
   console.log(`AI Token Monitor running at http://localhost:${PORT}/`);
+  initWatcher();
 
   try {
     const startCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';

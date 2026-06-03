@@ -21,6 +21,7 @@ function getBrandColor(key) {
 const FALLBACK_BRAND_COLOR = '#94a3b8';
 
 const DEFAULT_BRAND_METADATA = {
+  rtk: { name: 'RTK Proxy', inputCost: 0, outputCost: 0, color: 'var(--color-rtk)', limit: 0, limit5h: 0, limitWeekly: 0, windowLabel: '5-Hour' },
   gemini: { name: 'Gemini', inputCost: 1.25, outputCost: 5.00, color: 'var(--color-gemini)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
   claude: { name: 'Claude', inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)', limit: 100.00, limit5h: 5.00, limitWeekly: 30.00, windowLabel: '5-Hour' },
   minimax: { name: 'Minimax', inputCost: 1.00, outputCost: 4.00, color: 'var(--color-minimax)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
@@ -31,19 +32,26 @@ const DEFAULT_BRAND_METADATA = {
 let state = {
   brandMetadata: JSON.parse(localStorage.getItem('atm_brand_metadata')) || JSON.parse(JSON.stringify(DEFAULT_BRAND_METADATA)),
   requests: JSON.parse(localStorage.getItem('atm_requests')) || [],
+  realCommands: [],
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
+  monitorMode: localStorage.getItem('atm_monitor_mode') || 'real',
   currentSort: { key: 'cost', direction: 'desc' }
 };
 
-// Migration: Ensure new fields exist in loaded state (older localStorage payloads)
-Object.keys(state.brandMetadata).forEach(bKey => {
-  const def = DEFAULT_BRAND_METADATA[bKey];
-  Object.keys(def).forEach(field => {
-    if (state.brandMetadata[bKey][field] === undefined) {
-      state.brandMetadata[bKey][field] = def[field];
-    }
-  });
+// Migration: Ensure new brands and fields exist in loaded state (older localStorage payloads)
+Object.keys(DEFAULT_BRAND_METADATA).forEach(bKey => {
+  if (!state.brandMetadata[bKey]) {
+    // New brand added since last save — inject it with defaults
+    state.brandMetadata[bKey] = JSON.parse(JSON.stringify(DEFAULT_BRAND_METADATA[bKey]));
+  } else {
+    const def = DEFAULT_BRAND_METADATA[bKey];
+    Object.keys(def).forEach(field => {
+      if (state.brandMetadata[bKey][field] === undefined) {
+        state.brandMetadata[bKey][field] = def[field];
+      }
+    });
+  }
 });
 
 
@@ -62,67 +70,80 @@ let refreshTimer = REFRESH_INTERVAL_SECONDS;
 let refreshTimerIntervalId = null;
 let simulationTimeoutId = null;
 
-// DOM Elements
-const elements = {
-  themeToggleBtn: document.getElementById('theme-toggle-btn'),
-  themeIcon: document.getElementById('theme-icon'),
-  
-  // Timer Elements
-  timerProgressRing: document.getElementById('timer-progress-ring'),
-  timerText: document.getElementById('timer-text'),
-  
-  // Global Stats Elements
-  valTotalRequests: document.getElementById('val-total-requests'),
-  valTotalTokens: document.getElementById('val-total-tokens'),
-  valInputTokens: document.getElementById('val-input-tokens'),
-  valOutputTokens: document.getElementById('val-output-tokens'),
-  valTotalCost: document.getElementById('val-total-cost'),
-  valTotalSavings: document.getElementById('val-total-savings'),
-  valSavedTokens: document.getElementById('val-saved-tokens'),
-  valSavingsPercentage: document.getElementById('val-savings-percentage'),
-  
-  // Section containers
-  brandCardsContainer: document.getElementById('brand-cards-container'),
-  tableBody: document.getElementById('table-body'),
-  consoleLogsStream: document.getElementById('console-logs-stream'),
-  simActivityDot: document.getElementById('sim-activity-dot'),
-  consoleStatusIndicator: document.getElementById('console-status-indicator'),
-  valSimulationSpeed: document.getElementById('val-simulation-speed'),
-  
-  // Control buttons
-  toggleSimBtn: document.getElementById('toggle-sim-btn'),
-  simStatusIcon: document.getElementById('sim-status-icon'),
-  simStatusText: document.getElementById('sim-status-text'),
-  openSimModalBtn: document.getElementById('open-sim-modal-btn'),
-  openSettingsModalBtn: document.getElementById('open-settings-modal-btn'),
-  clearLogsBtn: document.getElementById('clear-logs-btn'),
-  exportCsvBtn: document.getElementById('export-csv-btn'),
-  
-  // Modals
-  settingsModal: document.getElementById('settings-modal'),
-  pricingRatesForm: document.getElementById('pricing-rates-form'),
-  pricingRatesFormFields: document.getElementById('pricing-rates-form-fields'),
-  simModal: document.getElementById('sim-modal'),
-  customRequestForm: document.getElementById('custom-request-form'),
-
-  // Settings Tabs & Tokens
-  tabRatesBtn: document.getElementById('tab-rates-btn'),
-  tabTokensBtn: document.getElementById('tab-tokens-btn'),
-  tabContentRates: document.getElementById('tab-content-rates'),
-  tabContentTokens: document.getElementById('tab-content-tokens'),
-  tokenAnthropic: document.getElementById('token-anthropic'),
-  tokenGemini: document.getElementById('token-gemini'),
-  tokenGlm: document.getElementById('token-glm'),
-  tokenMinimax: document.getElementById('token-minimax')
-};
+/// DOM Elements — populated in init() to guarantee the DOM is ready.
+let elements = {};
 
 // 2. INITIALIZATION
+function initElements() {
+  elements = {
+    themeToggleBtn: document.getElementById('theme-toggle-btn'),
+    themeIcon: document.getElementById('theme-icon'),
+
+    // Timer Elements
+    timerProgressRing: document.getElementById('timer-progress-ring'),
+    timerText: document.getElementById('timer-text'),
+
+    // Global stat values
+    valTotalRequests: document.getElementById('val-total-requests'),
+    valTotalTokens: document.getElementById('val-total-tokens'),
+    valInputTokens: document.getElementById('val-input-tokens'),
+    valOutputTokens: document.getElementById('val-output-tokens'),
+    valTotalCost: document.getElementById('val-total-cost'),
+    valTotalSavings: document.getElementById('val-total-savings'),
+    valSavedTokens: document.getElementById('val-saved-tokens'),
+    valSavingsPercentage: document.getElementById('val-savings-percentage'),
+
+    // Section containers
+    brandCardsContainer: document.getElementById('brand-cards-container'),
+    tableBody: document.getElementById('table-body'),
+    consoleLogsStream: document.getElementById('console-logs-stream'),
+    simActivityDot: document.getElementById('sim-activity-dot'),
+    consoleStatusIndicator: document.getElementById('console-status-indicator'),
+    valSimulationSpeed: document.getElementById('val-simulation-speed'),
+
+    // Control buttons
+    toggleSimBtn: document.getElementById('toggle-sim-btn'),
+    simStatusIcon: document.getElementById('sim-status-icon'),
+    simStatusText: document.getElementById('sim-status-text'),
+    openSimModalBtn: document.getElementById('open-sim-modal-btn'),
+    openSettingsModalBtn: document.getElementById('open-settings-modal-btn'),
+    clearLogsBtn: document.getElementById('clear-logs-btn'),
+    exportCsvBtn: document.getElementById('export-csv-btn'),
+
+    // Modals
+    settingsModal: document.getElementById('settings-modal'),
+    pricingRatesForm: document.getElementById('pricing-rates-form'),
+    pricingRatesFormFields: document.getElementById('pricing-rates-form-fields'),
+    simModal: document.getElementById('sim-modal'),
+    customRequestForm: document.getElementById('custom-request-form'),
+
+    monitorModeSelect: document.getElementById('monitor-mode-select'),
+
+    // Settings Tabs & Tokens
+    tabRatesBtn: document.getElementById('tab-rates-btn'),
+    tabTokensBtn: document.getElementById('tab-tokens-btn'),
+    tabContentRates: document.getElementById('tab-content-rates'),
+    tabContentTokens: document.getElementById('tab-content-tokens'),
+    tokenAnthropic: document.getElementById('token-anthropic'),
+    tokenGemini: document.getElementById('token-gemini'),
+    tokenGlm: document.getElementById('token-glm'),
+    tokenMinimax: document.getElementById('token-minimax')
+  };
+}
+
 function init() {
+  // Populate DOM element references now that DOM is guaranteed ready
+  initElements();
+
   // Apply initial theme
   document.documentElement.setAttribute('data-theme', state.theme);
-  elements.themeIcon.textContent = state.theme === 'dark' ? '☀️' : '🌙';
-  document.getElementById('footer-year').textContent = new Date().getFullYear();
-  
+  if (elements.themeIcon) elements.themeIcon.textContent = state.theme === 'dark' ? '☀️' : '🌙';
+  const footerYear = document.getElementById('footer-year');
+  if (footerYear) footerYear.textContent = new Date().getFullYear();
+
+  if (elements.monitorModeSelect) elements.monitorModeSelect.value = state.monitorMode;
+  updateSimModeVisibility();
+
   // Build pricing rates input fields in settings modal
   buildSettingsFormFields();
   
@@ -138,20 +159,27 @@ function init() {
   // Start countdown loops
   startCountdownTimer();
   
-  // Render once with whatever sim data we have (could be from a previous session)
-  calculateAndRenderDashboard();
-
-  // Start simulation runner if active
-  if (state.isAutoSimulating) {
-    scheduleNextSimulation();
-    updateSimButtonUI(true);
+  if (state.monitorMode === 'real') {
+    if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
+    if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
+    fetchRealRTKData(true);
+    connectRTKStream();
   } else {
-    updateSimButtonUI(false);
-  }
+    // Render once with whatever sim data we have (could be from a previous session)
+    calculateAndRenderDashboard();
 
-  // Pre-populate with some initial mock logs if empty
-  if (state.requests.length === 0) {
-    generateInitialMockHistory();
+    // Start simulation runner if active
+    if (state.isAutoSimulating) {
+      scheduleNextSimulation();
+      updateSimButtonUI(true);
+    } else {
+      updateSimButtonUI(false);
+    }
+
+    // Pre-populate with some initial mock logs if empty
+    if (state.requests.length === 0) {
+      generateInitialMockHistory();
+    }
   }
 }
 
@@ -190,7 +218,7 @@ function calculateAndRenderDashboard() {
   let globalSavings = 0;
 
   // Process request history
-  state.requests.forEach(req => {
+  getActiveRequests().forEach(req => {
     const brand = brandData[req.brand];
     if (brand) {
       brand.requests++;
@@ -394,8 +422,12 @@ function startCountdownTimer() {
     updateTimerUI();
     
     if (refreshTimer <= 0) {
-      calculateAndRenderDashboard();
-      logEvent('SYSTEM', 'Completed scheduled dashboard metrics recalculation.');
+      if (state.monitorMode === 'real') {
+        fetchRealRTKData();
+      } else {
+        calculateAndRenderDashboard();
+        logEvent('SYSTEM', 'Completed scheduled dashboard metrics recalculation.');
+      }
       
       // Spark visual indicator or countdown reset
       refreshTimer = REFRESH_INTERVAL_SECONDS;
@@ -580,17 +612,17 @@ function logEventSafe(source, segments) {
 // 7. EVENT LISTENERS SETUP
 function setupEventListeners() {
   // Theme Switching
-  elements.themeToggleBtn.addEventListener('click', () => {
+  if (elements.themeToggleBtn) elements.themeToggleBtn.addEventListener('click', () => {
     const nextTheme = state.theme === 'light' ? 'dark' : 'light';
     state.theme = nextTheme;
     localStorage.setItem('atm_theme', nextTheme);
     document.documentElement.setAttribute('data-theme', nextTheme);
-    elements.themeIcon.textContent = nextTheme === 'dark' ? '☀️' : '🌙';
+    if (elements.themeIcon) elements.themeIcon.textContent = nextTheme === 'dark' ? '☀️' : '🌙';
     logEvent('SYSTEM', `UI visual theme toggled to ${nextTheme} mode.`);
   });
   
   // Simulation Control Button
-  elements.toggleSimBtn.addEventListener('click', () => {
+  if (elements.toggleSimBtn) elements.toggleSimBtn.addEventListener('click', () => {
     state.isAutoSimulating = !state.isAutoSimulating;
     localStorage.setItem('atm_auto_sim', state.isAutoSimulating);
     
@@ -606,18 +638,19 @@ function setupEventListeners() {
   });
   
   // Clear Logs — clears both sim and real data stores
-  elements.clearLogsBtn.addEventListener('click', () => {
+  if (elements.clearLogsBtn) elements.clearLogsBtn.addEventListener('click', () => {
     if (confirm('Are you sure you want to reset all token tracking usage logs? This clears LocalStorage.')) {
       state.requests = [];
+      state.realCommands = [];
       localStorage.setItem('atm_requests', JSON.stringify([]));
       calculateAndRenderDashboard();
-      elements.consoleLogsStream.innerHTML = '';
+      if (elements.consoleLogsStream) elements.consoleLogsStream.innerHTML = '';
       logEvent('SYSTEM', 'Reset complete. Usage charts and logs cleared.');
     }
   });
   
   // Export CSV
-  elements.exportCsvBtn.addEventListener('click', () => {
+  if (elements.exportCsvBtn) elements.exportCsvBtn.addEventListener('click', () => {
     exportToCSV();
   });
   
@@ -629,11 +662,11 @@ function setupEventListeners() {
     });
   });
   
-  elements.openSettingsModalBtn.addEventListener('click', () => {
+  if (elements.openSettingsModalBtn) elements.openSettingsModalBtn.addEventListener('click', () => {
     openModal('settings-modal');
   });
   
-  elements.openSimModalBtn.addEventListener('click', () => {
+  if (elements.openSimModalBtn) elements.openSimModalBtn.addEventListener('click', () => {
     openModal('sim-modal');
   });
   
@@ -651,7 +684,7 @@ function setupEventListeners() {
   });
   
   // Form submission: Pricing Rates & API Keys
-  elements.pricingRatesForm.addEventListener('submit', (e) => {
+  if (elements.pricingRatesForm) elements.pricingRatesForm.addEventListener('submit', (e) => {
     e.preventDefault();
     let hasInvalid = false;
     Object.keys(state.brandMetadata).forEach(bKey => {
@@ -709,7 +742,7 @@ function setupEventListeners() {
 
   
   // Form submission: Custom Request Simulation
-  elements.customRequestForm.addEventListener('submit', (e) => {
+  if (elements.customRequestForm) elements.customRequestForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const brand = document.getElementById('sim-brand-select').value;
     const input = parseInt(document.getElementById('sim-input-tokens').value);
@@ -740,21 +773,45 @@ function setupEventListeners() {
       calculateAndRenderDashboard();
     });
   });
+
+  // Monitor Mode Selection Listener
+  if (elements.monitorModeSelect) elements.monitorModeSelect.addEventListener('change', (e) => {
+    state.monitorMode = e.target.value;
+    localStorage.setItem('atm_monitor_mode', state.monitorMode);
+    logEvent('SYSTEM', `Monitor mode changed to: ${state.monitorMode === 'real' ? 'Real RTK Monitor' : 'Simulation'}`);
+
+    if (state.monitorMode === 'real') {
+      if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
+      if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
+      if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
+      fetchRealRTKData(true);
+      connectRTKStream();
+    } else {
+      if (rtkEventSource) {
+        rtkEventSource.close();
+        rtkEventSource = null;
+      }
+      updateSimButtonUI(state.isAutoSimulating);
+      if (state.isAutoSimulating) scheduleNextSimulation();
+      calculateAndRenderDashboard();
+    }
+  });
+
 }
 
 function updateSimButtonUI(isActive) {
   if (isActive) {
-    elements.simStatusIcon.textContent = '⏸';
-    elements.simStatusText.textContent = 'Pause Simulation';
-    elements.simActivityDot.className = 'status-indicator';
-    elements.consoleStatusIndicator.className = 'status-indicator';
-    elements.valSimulationSpeed.textContent = 'Auto-simulation active (10-30s)';
+    if (elements.simStatusIcon) elements.simStatusIcon.textContent = '⏸';
+    if (elements.simStatusText) elements.simStatusText.textContent = 'Pause Simulation';
+    if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
+    if (elements.consoleStatusIndicator) elements.consoleStatusIndicator.className = 'status-indicator';
+    if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Auto-simulation active (10-30s)';
   } else {
-    elements.simStatusIcon.textContent = '▶';
-    elements.simStatusText.textContent = 'Resume Simulation';
-    elements.simActivityDot.className = 'status-indicator paused';
-    elements.consoleStatusIndicator.className = 'status-indicator paused';
-    elements.valSimulationSpeed.textContent = 'Auto-simulation paused';
+    if (elements.simStatusIcon) elements.simStatusIcon.textContent = '▶';
+    if (elements.simStatusText) elements.simStatusText.textContent = 'Resume Simulation';
+    if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator paused';
+    if (elements.consoleStatusIndicator) elements.consoleStatusIndicator.className = 'status-indicator paused';
+    if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Auto-simulation paused';
   }
 }
 
@@ -922,12 +979,177 @@ function fetchAPIKeys() {
   fetch('/api/env')
     .then(res => res.json())
     .then(data => {
-      if (data.ANTHROPIC_API_KEY) elements.tokenAnthropic.value = data.ANTHROPIC_API_KEY;
-      if (data.GEMINI_API_KEY) elements.tokenGemini.value = data.GEMINI_API_KEY;
-      if (data.GLM_API_KEY) elements.tokenGlm.value = data.GLM_API_KEY;
-      if (data.MINIMAX_API_KEY) elements.tokenMinimax.value = data.MINIMAX_API_KEY;
+      if (data.ANTHROPIC_API_KEY && elements.tokenAnthropic) elements.tokenAnthropic.value = data.ANTHROPIC_API_KEY;
+      if (data.GEMINI_API_KEY && elements.tokenGemini) elements.tokenGemini.value = data.GEMINI_API_KEY;
+      if (data.GLM_API_KEY && elements.tokenGlm) elements.tokenGlm.value = data.GLM_API_KEY;
+      if (data.MINIMAX_API_KEY && elements.tokenMinimax) elements.tokenMinimax.value = data.MINIMAX_API_KEY;
     })
     .catch(err => console.error('Failed to load local API keys from backend:', err));
+}
+
+// Returns the active dataset for the current monitor mode.
+function getActiveRequests() {
+  return state.monitorMode === 'real' ? state.realCommands : state.requests;
+}
+
+let lastSeenCommandId = 0;
+let rtkEventSource = null;
+
+function updateSimModeVisibility() {
+  const isReal = state.monitorMode === 'real';
+  if (elements.toggleSimBtn) elements.toggleSimBtn.style.display = isReal ? 'none' : '';
+  if (elements.openSimModalBtn) elements.openSimModalBtn.style.display = isReal ? 'none' : '';
+}
+
+function fetchRealRTKData(forceRefresh = false) {
+  if (forceRefresh) lastSeenCommandId = 0;
+  fetch('/api/rtk')
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      if (data.error) {
+        logEvent('SYSTEM', `RTK load status: ${data.error}`);
+        return;
+      }
+
+      const commands = data.commands || [];
+      const mappedRequests = [];
+
+      // Sort by timestamp ascending to process history chronologically
+      const sortedCmds = [...commands].sort((a, b) => a.id - b.id);
+
+      const isInitialLoad = lastSeenCommandId === 0;
+      const recentLogThreshold = isInitialLoad ? Math.max(0, sortedCmds.length - 15) : 0;
+
+      sortedCmds.forEach((cmd, idx) => {
+        const brandKey = detectBrand(cmd.original_cmd);
+        const meta = state.brandMetadata[brandKey];
+
+        const billedInput = Math.max(0, cmd.input_tokens - cmd.saved_tokens);
+        const cost = ((billedInput * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
+        const savings = (cmd.saved_tokens * meta.inputCost) / 1000000;
+
+        mappedRequests.push({
+          id: 'rtk_' + cmd.id,
+          timestamp: new Date(cmd.timestamp).getTime(),
+          brand: brandKey,
+          inputTokens: cmd.input_tokens,
+          outputTokens: cmd.output_tokens,
+          savedTokens: cmd.saved_tokens,
+          cost: parseFloat(cost.toFixed(6)),
+          savings: parseFloat(savings.toFixed(6)),
+          cmdText: cmd.original_cmd
+        });
+
+        // On initial load, log the most recent 15 commands to populate the feed.
+        // On subsequent refreshes, log only genuinely new commands.
+        const shouldLog = isInitialLoad ? (idx >= recentLogThreshold) : (cmd.id > lastSeenCommandId);
+        if (shouldLog) {
+          const savedPercent = cmd.input_tokens > 0 ? ((cmd.saved_tokens / cmd.input_tokens) * 100).toFixed(0) : '0';
+          logEventSafe(meta.name, [
+            { text: '[Real] "' },
+            { text: cmd.original_cmd },
+            { text: '" | In: ' },
+            { text: formatCompactNumber(cmd.input_tokens), cls: 'highlight-tokens' },
+            { text: ` (Saved ${savedPercent}%) | Out: ` },
+            { text: formatCompactNumber(cmd.output_tokens), cls: 'highlight-tokens' },
+            { text: '. Cost: ' },
+            { text: formatCurrency(cost), cls: 'highlight-cost' }
+          ]);
+        }
+      });
+
+      if (sortedCmds.length > 0) {
+        lastSeenCommandId = sortedCmds[sortedCmds.length - 1].id;
+      }
+
+      state.realCommands = mappedRequests;
+      if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
+        state.realCommands = state.realCommands.slice(-MAX_REQUESTS_RETAINED);
+      }
+      if (state.monitorMode === 'real') {
+        calculateAndRenderDashboard();
+      }
+    })
+    .catch(err => {
+      logEvent('SYSTEM', `Failed to connect to RTK backend API: ${err.message}`);
+    });
+}
+
+function connectRTKStream() {
+  if (rtkEventSource) {
+    rtkEventSource.close();
+  }
+
+  rtkEventSource = new EventSource('/api/rtk/stream');
+
+  rtkEventSource.onmessage = (event) => {
+    try {
+      const cmd = JSON.parse(event.data);
+      if (cmd.status === 'connected') return;
+
+      const brandKey = detectBrand(cmd.original_cmd);
+      const meta = state.brandMetadata[brandKey];
+
+      const billedInput = Math.max(0, cmd.input_tokens - cmd.saved_tokens);
+      const cost = ((billedInput * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
+      const savings = (cmd.saved_tokens * meta.inputCost) / 1000000;
+
+      const newReq = {
+        id: 'rtk_' + cmd.id,
+        timestamp: new Date(cmd.timestamp).getTime(),
+        brand: brandKey,
+        inputTokens: cmd.input_tokens,
+        outputTokens: cmd.output_tokens,
+        savedTokens: cmd.saved_tokens,
+        cost: parseFloat(cost.toFixed(6)),
+        savings: parseFloat(savings.toFixed(6)),
+        cmdText: cmd.original_cmd
+      };
+
+      const exists = state.realCommands.some(r => r.id === newReq.id);
+      if (!exists) {
+        state.realCommands.push(newReq);
+        if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
+          state.realCommands.shift();
+        }
+
+        const savedPercent = cmd.input_tokens > 0 ? ((cmd.saved_tokens / cmd.input_tokens) * 100).toFixed(0) : '0';
+        logEventSafe(meta.name, [
+          { text: '[Real-Time] "' },
+          { text: cmd.original_cmd },
+          { text: '" | In: ' },
+          { text: formatCompactNumber(cmd.input_tokens), cls: 'highlight-tokens' },
+          { text: ` (Saved ${savedPercent}%) | Out: ` },
+          { text: formatCompactNumber(cmd.output_tokens), cls: 'highlight-tokens' },
+          { text: '. Cost: ' },
+          { text: formatCurrency(cost), cls: 'highlight-cost' }
+        ]);
+
+        if (state.monitorMode === 'real') {
+          calculateAndRenderDashboard();
+        }
+      }
+    } catch (e) {
+      console.error('Error processing real-time SSE stream packet:', e);
+    }
+  };
+
+  rtkEventSource.onerror = (err) => {
+    console.warn('Real-time SSE stream connection error, retrying...', err);
+  };
+}
+
+function detectBrand(cmd) {
+  const c = cmd.toLowerCase();
+  if (c.includes('claude') || c.includes('anthropic')) return 'claude';
+  if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
+  if (c.includes('minimax')) return 'minimax';
+  if (c.includes('glm') || c.includes('zhipu')) return 'glm';
+  // Untagged commands are RTK CLI proxy operations (git, grep, find, etc.)
+  return 'rtk';
 }
 
 // Run application!

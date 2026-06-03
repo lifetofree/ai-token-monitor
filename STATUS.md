@@ -9,11 +9,11 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 
 ## Role Status Checkpoints
 
-- [x] **👑 Product Owner (PO)**: Brand list is now four real LLM Brands (gemini, claude, minimax, glm); `docs/BUSINESS_GOALS.md` written; v1 monitor-only and Simulation-only.
-- [x] **📋 Product Manager (PM)**: `docs/REQUIREMENTS.md` and `docs/USER_JOURNEY.md` written; 10 acceptance criteria; flow covers the (sole) Simulation Mode.
+- [x] **👑 Product Owner (PO)**: Defined target brand list, v1 scope, SQLite backend sync vision, and **brand attribution fix vision for Real Mode** in [docs/BUSINESS_GOALS.md](./docs/BUSINESS_GOALS.md). Supports both Simulation and Real Mode.
+- [x] **📋 Product Manager (PM)**: `docs/REQUIREMENTS.md` and `docs/USER_JOURNEY.md` written; 10 acceptance criteria; flow covers both Simulation and Real Mode.
 - [x] **⚡ Technical Lead**: Vanilla HTML/CSS/JS, zero-dep, local Node server; `docs/TECH_STACK.md` written; security baseline documented.
 - [x] **🏗️ Architect**: Static SPA, `localStorage` persistence, dynamic DOM rendering; `docs/SYSTEM_DESIGN.md` written; data model and API contracts documented.
-- [~] **💻 TDD Engineer**: Implemented formatters, simulation engine, settings form. **Caveat: there are no automated tests.** Pure functions (cost calc, cache math, CSV builder) are good candidates for a Vitest suite — not yet written.
+- [~] **💻 TDD Engineer**: Implemented formatters, simulation engine, settings form, **and restored Real RTK mode with dynamic Brand mapping dropdown fallback.** **Caveat: there are no automated tests.** Pure functions are candidates for a Vitest suite.
 - [x] **🕵️ Reviewer**: Three review passes complete (R1, R2, R3, R4) and logged in `docs/REVIEWS.md`. Outstanding items are tracked as R3 in that file.
 - [~] **🚀 DevOps Engineer**: `package.json` and `node server.js` working. `.gitignore` is in place. **Outstanding: no CI, no Docker, no GitHub Actions.**
 
