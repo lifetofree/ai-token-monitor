@@ -14,7 +14,7 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 - [~] **⚡ Technical Lead**: Vanilla HTML/CSS/JS, zero-dep, local Node server. Outstanding: no formal `docs/TECH_STACK.md`; no security baseline doc.
 - [~] **🏗️ Architect**: Static SPA, localStorage persistence, dynamic SVG/DOM rendering. Outstanding: no formal `docs/SYSTEM_DESIGN.md`; data store is `localStorage` only (no SQLite for requests), which limits retention and mode-switch fidelity.
 - [x] **💻 TDD Engineer**: Implemented formatters, simulation engine, real-RTK adapter. **Caveat: there are no automated tests.** Pure functions (cost calc, cache math, CSV builder) are good candidates for a Vitest suite — not yet written.
-- [~] **🕵️ Reviewer**: Two-pass review complete. **Outstanding: no `docs/REVIEWS.md` log of issues found/fixed.**
+- [x] **🕵️ Reviewer**: Two-pass review complete. **`docs/REVIEWS.md` has been generated containing findings and regressions.**
 - [~] **🚀 DevOps Engineer**: `package.json` and `node server.js` working. **Outstanding: no CI, no Docker, no `.gitignore` was added in a later pass (now present), no GitHub Actions.**
 
 ---

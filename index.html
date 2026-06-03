@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Token Monitor - Real-Time Multi-Brand Usage Dashboard</title>
-  <meta name="description" content="A real-time token monitor dashboard analyzing cost, usage, and caching optimization across multiple LLM brands including Gemini, Antigravity, Claude, Minimax, and GLM.">
+  <meta name="description" content="A real-time token monitor dashboard analyzing cost, usage, and caching optimization across multiple LLM brands including Gemini, Claude, Minimax, and GLM.">
   <link rel="stylesheet" href="styles.css">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
 </head>
@@ -30,12 +30,6 @@
           </div>
           <span id="timer-text">Refreshes in 30s</span>
         </div>
-
-        <!-- Mode Switcher -->
-        <select id="monitor-mode-select" class="btn" style="padding: 8px 12px; font-size: 13px;" title="Select between real RTK monitor and mock simulation data">
-          <option value="sim">Mode: Simulation</option>
-          <option value="real" selected>Mode: Real RTK Monitor</option>
-        </select>
 
         <!-- Simulation Toggle Button -->
         <button id="toggle-sim-btn" class="btn" title="Toggle background traffic generation">
@@ -234,7 +228,6 @@
             <label for="sim-brand-select">LLM Provider/Brand</label>
             <select id="sim-brand-select" required>
               <option value="gemini">Gemini</option>
-              <option value="antigravity">Antigravity</option>
               <option value="claude">Claude</option>
               <option value="minimax">Minimax</option>
               <option value="glm">GLM</option>

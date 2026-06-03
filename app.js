@@ -22,7 +22,6 @@ const FALLBACK_BRAND_COLOR = '#94a3b8';
 
 const DEFAULT_BRAND_METADATA = {
   gemini: { name: 'Gemini', inputCost: 1.25, outputCost: 5.00, color: 'var(--color-gemini)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
-  antigravity: { name: 'Antigravity', inputCost: 0.80, outputCost: 3.00, color: 'var(--color-antigravity)', limit: 40.00, limit5h: 1.50, limitWeekly: 12.00, windowLabel: '5-Hour' },
   claude: { name: 'Claude', inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)', limit: 100.00, limit5h: 5.00, limitWeekly: 30.00, windowLabel: '5-Hour' },
   minimax: { name: 'Minimax', inputCost: 1.00, outputCost: 4.00, color: 'var(--color-minimax)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
   glm: { name: 'GLM', inputCost: 0.50, outputCost: 2.00, color: 'var(--color-glm)', limit: 20.00, limit5h: 0.80, limitWeekly: 6.00, windowLabel: '5-Hour' }
@@ -32,11 +31,9 @@ const DEFAULT_BRAND_METADATA = {
 let state = {
   brandMetadata: JSON.parse(localStorage.getItem('atm_brand_metadata')) || JSON.parse(JSON.stringify(DEFAULT_BRAND_METADATA)),
   requests: JSON.parse(localStorage.getItem('atm_requests')) || [],
-  realCommands: [],  // Real-mode data lives here — never mixed with sim `requests`
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
-  currentSort: { key: 'cost', direction: 'desc' },
-  monitorMode: localStorage.getItem('atm_monitor_mode') || 'real'
+  currentSort: { key: 'cost', direction: 'desc' }
 };
 
 // Migration: Ensure new fields exist in loaded state (older localStorage payloads)
@@ -108,8 +105,7 @@ const elements = {
   simModal: document.getElementById('sim-modal'),
   customRequestForm: document.getElementById('custom-request-form'),
 
-  // Real Monitor Switcher & Tokens
-  monitorModeSelect: document.getElementById('monitor-mode-select'),
+  // Settings Tabs & Tokens
   tabRatesBtn: document.getElementById('tab-rates-btn'),
   tabTokensBtn: document.getElementById('tab-tokens-btn'),
   tabContentRates: document.getElementById('tab-content-rates'),
@@ -127,10 +123,6 @@ function init() {
   elements.themeIcon.textContent = state.theme === 'dark' ? '☀️' : '🌙';
   document.getElementById('footer-year').textContent = new Date().getFullYear();
   
-  // Set monitor mode selector initial value
-  elements.monitorModeSelect.value = state.monitorMode;
-  updateSimControlsVisibility(state.monitorMode);
-
   // Build pricing rates input fields in settings modal
   buildSettingsFormFields();
   
@@ -146,44 +138,30 @@ function init() {
   // Start countdown loops
   startCountdownTimer();
   
-  if (state.monitorMode === 'real') {
-    elements.simActivityDot.className = 'status-indicator';
-    elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
-    fetchRealRTKData(true);
+  // Render once with whatever sim data we have (could be from a previous session)
+  calculateAndRenderDashboard();
+
+  // Start simulation runner if active
+  if (state.isAutoSimulating) {
+    scheduleNextSimulation();
+    updateSimButtonUI(true);
   } else {
-    // Render once with whatever sim data we have (could be from a previous session)
-    calculateAndRenderDashboard();
+    updateSimButtonUI(false);
+  }
 
-    // Start simulation runner if active
-    if (state.isAutoSimulating) {
-      scheduleNextSimulation();
-      updateSimButtonUI(true);
-    } else {
-      updateSimButtonUI(false);
-    }
-
-    // Pre-populate with some initial mock logs if empty
-    if (state.requests.length === 0) {
-      generateInitialMockHistory();
-    }
+  // Pre-populate with some initial mock logs if empty
+  if (state.requests.length === 0) {
+    generateInitialMockHistory();
   }
 }
 
 // 3. STATS LOGIC (Calculations & UI Rendering)
-
-// Returns the active dataset for the current monitor mode.
-// Sim mode uses persisted simulated requests; real mode uses commands fetched from RTK.
-// Keeping them separate prevents one mode's data from clobbering the other.
-function getActiveRequests() {
-  return state.monitorMode === 'real' ? state.realCommands : state.requests;
-}
 
 function calculateAndRenderDashboard() {
   const brandData = {};
   const now = Date.now();
   const fiveHoursAgo = now - FIVE_HOUR_WINDOW_MS;
   const oneWeekAgo = now - ONE_WEEK_WINDOW_MS;
-  const activeRequests = getActiveRequests();
 
   // Initialize brand accumulator
   Object.keys(state.brandMetadata).forEach(bKey => {
@@ -212,7 +190,7 @@ function calculateAndRenderDashboard() {
   let globalSavings = 0;
 
   // Process request history
-  activeRequests.forEach(req => {
+  state.requests.forEach(req => {
     const brand = brandData[req.brand];
     if (brand) {
       brand.requests++;
@@ -416,12 +394,8 @@ function startCountdownTimer() {
     updateTimerUI();
     
     if (refreshTimer <= 0) {
-      if (state.monitorMode === 'real') {
-        fetchRealRTKData();
-      } else {
-        calculateAndRenderDashboard();
-        logEvent('SYSTEM', 'Completed scheduled dashboard metrics recalculation.');
-      }
+      calculateAndRenderDashboard();
+      logEvent('SYSTEM', 'Completed scheduled dashboard metrics recalculation.');
       
       // Spark visual indicator or countdown reset
       refreshTimer = REFRESH_INTERVAL_SECONDS;
@@ -463,9 +437,8 @@ function triggerRandomMockRequest() {
   const inputTokens = Math.floor(Math.random() * 14500) + 500;
   // Output: 100 - 4000 tokens
   const outputTokens = Math.floor(Math.random() * 3900) + 100;
-  // Cache hit rate (Antigravity has higher caching due to the RTK optimize logic rule, 60-90% savings)
-  const isAntigravity = selectedBrand === 'antigravity';
-  const hitProbability = isAntigravity ? (Math.floor(Math.random() * 30) + 60) : Math.floor(Math.random() * 45); // Antigravity 60-90%, others 0-45%
+  // Cache hit rate (0-45% for all brands)
+  const hitProbability = Math.floor(Math.random() * 45);
 
   const savedTokens = Math.floor(inputTokens * (hitProbability / 100));
 
@@ -525,8 +498,7 @@ function generateInitialMockHistory() {
 
     const inputTokens = Math.floor(Math.random() * 8000) + 400;
     const outputTokens = Math.floor(Math.random() * 2000) + 100;
-    const isAntigravity = brandKey === 'antigravity';
-    const hitProbability = isAntigravity ? (Math.floor(Math.random() * 30) + 60) : Math.floor(Math.random() * 35);
+    const hitProbability = Math.floor(Math.random() * 35);
     const savedTokens = Math.floor(inputTokens * (hitProbability / 100));
 
     const billedInput = Math.max(0, inputTokens - savedTokens);
@@ -635,13 +607,12 @@ function setupEventListeners() {
   
   // Clear Logs — clears both sim and real data stores
   elements.clearLogsBtn.addEventListener('click', () => {
-    if (confirm('Are you sure you want to reset all token tracking usage logs? This clears LocalStorage and the real-time command cache.')) {
+    if (confirm('Are you sure you want to reset all token tracking usage logs? This clears LocalStorage.')) {
       state.requests = [];
-      state.realCommands = [];
       localStorage.setItem('atm_requests', JSON.stringify([]));
       calculateAndRenderDashboard();
       elements.consoleLogsStream.innerHTML = '';
-      logEvent('SYSTEM', 'Reset complete. Usage charts, logs, and real-time cache cleared.');
+      logEvent('SYSTEM', 'Reset complete. Usage charts and logs cleared.');
     }
   });
   
@@ -731,11 +702,7 @@ function setupEventListeners() {
 
     closeModal('settings-modal');
 
-    if (state.monitorMode === 'real') {
-      fetchRealRTKData(true);
-    } else {
-      calculateAndRenderDashboard();
-    }
+    calculateAndRenderDashboard();
     logEvent('SYSTEM', 'Custom LLM pricing models, limits, and API keys updated.');
   });
 
@@ -773,31 +740,6 @@ function setupEventListeners() {
       calculateAndRenderDashboard();
     });
   });
-
-  // Monitor Mode Selection Listener
-  elements.monitorModeSelect.addEventListener('change', (e) => {
-    state.monitorMode = e.target.value;
-    localStorage.setItem('atm_monitor_mode', state.monitorMode);
-    logEvent('SYSTEM', `Monitor mode changed to: ${state.monitorMode === 'real' ? 'Real RTK Monitor' : 'Simulation'}`);
-    updateSimControlsVisibility(state.monitorMode);
-
-    if (state.monitorMode === 'real') {
-      if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
-      elements.simActivityDot.className = 'status-indicator';
-      elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
-      fetchRealRTKData(true);
-    } else {
-      updateSimButtonUI(state.isAutoSimulating);
-      if (state.isAutoSimulating) scheduleNextSimulation();
-      calculateAndRenderDashboard();
-    }
-  });
-}
-
-function updateSimControlsVisibility(mode) {
-  const isReal = mode === 'real';
-  elements.toggleSimBtn.style.display = isReal ? 'none' : '';
-  elements.openSimModalBtn.style.display = isReal ? 'none' : '';
 }
 
 function updateSimButtonUI(isActive) {
@@ -881,12 +823,10 @@ function exportToCSV() {
     ['Brand', 'Requests', 'Input Tokens', 'Output Tokens', 'Saved Tokens', 'Actual Cost (USD)', 'Saved Cost (USD)']
   ];
 
-  const activeRequests = getActiveRequests();
-
   // Compile row values
   Object.keys(state.brandMetadata).forEach(bKey => {
     const name = state.brandMetadata[bKey].name;
-    const reqs = activeRequests.filter(r => r.brand === bKey);
+    const reqs = state.requests.filter(r => r.brand === bKey);
 
     let input = 0, output = 0, saved = 0, cost = 0, savings = 0;
     reqs.forEach(r => {
@@ -956,8 +896,7 @@ function formatTimeRemaining(ms) {
   return `${mins}m`;
 }
 
-// 9. REAL MONITOR & ENV UTILITIES
-let lastSeenCommandId = 0;
+// 9. SETTINGS & ENV UTILITIES
 
 function setupTabs() {
   elements.tabRatesBtn.addEventListener('click', () => {
@@ -989,91 +928,6 @@ function fetchAPIKeys() {
       if (data.MINIMAX_API_KEY) elements.tokenMinimax.value = data.MINIMAX_API_KEY;
     })
     .catch(err => console.error('Failed to load local API keys from backend:', err));
-}
-
-function fetchRealRTKData(forceRefresh = false) {
-  if (forceRefresh) lastSeenCommandId = 0;
-  fetch('/api/rtk')
-    .then(res => res.json())
-    .then(data => {
-      if (data.error) {
-        logEvent('SYSTEM', `RTK load status: ${data.error}`);
-        return;
-      }
-
-      const commands = data.commands || [];
-      const mappedRequests = [];
-
-      // Sort by timestamp ascending to process history chronologically
-      const sortedCmds = [...commands].sort((a, b) => a.id - b.id);
-
-      const isInitialLoad = lastSeenCommandId === 0;
-      const recentLogThreshold = isInitialLoad ? Math.max(0, sortedCmds.length - 15) : 0;
-
-      sortedCmds.forEach((cmd, idx) => {
-        const brandKey = detectBrand(cmd.original_cmd);
-        const meta = state.brandMetadata[brandKey];
-
-        const billedInput = Math.max(0, cmd.input_tokens - cmd.saved_tokens);
-        const cost = ((billedInput * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
-        const savings = (cmd.saved_tokens * meta.inputCost) / 1000000;
-
-        mappedRequests.push({
-          id: 'rtk_' + cmd.id,
-          timestamp: new Date(cmd.timestamp).getTime(),
-          brand: brandKey,
-          inputTokens: cmd.input_tokens,
-          outputTokens: cmd.output_tokens,
-          savedTokens: cmd.saved_tokens,
-          cost: parseFloat(cost.toFixed(6)),
-          savings: parseFloat(savings.toFixed(6)),
-          cmdText: cmd.original_cmd
-        });
-
-        // On initial load, log the most recent 15 commands to populate the feed.
-        // On subsequent refreshes, log only genuinely new commands.
-        const shouldLog = isInitialLoad ? (idx >= recentLogThreshold) : (cmd.id > lastSeenCommandId);
-        if (shouldLog) {
-          const savedPercent = cmd.input_tokens > 0 ? ((cmd.saved_tokens / cmd.input_tokens) * 100).toFixed(0) : '0';
-          logEventSafe(meta.name, [
-            { text: '[Real] "' },
-            { text: cmd.original_cmd },
-            { text: '" | In: ' },
-            { text: formatCompactNumber(cmd.input_tokens), cls: 'highlight-tokens' },
-            { text: ` (Saved ${savedPercent}%) | Out: ` },
-            { text: formatCompactNumber(cmd.output_tokens), cls: 'highlight-tokens' },
-            { text: '. Cost: ' },
-            { text: formatCurrency(cost), cls: 'highlight-cost' }
-          ]);
-        }
-      });
-
-      if (sortedCmds.length > 0) {
-        lastSeenCommandId = sortedCmds[sortedCmds.length - 1].id;
-      }
-
-      // Real-mode data lives in its own store; do NOT clobber sim `state.requests`.
-      // Apply the same retention cap as sim mode.
-      if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
-        state.realCommands = state.realCommands.slice(-MAX_REQUESTS_RETAINED);
-      }
-      state.realCommands = mappedRequests;
-      if (state.monitorMode === 'real') {
-        calculateAndRenderDashboard();
-      }
-    })
-    .catch(err => {
-      logEvent('SYSTEM', `Failed to connect to RTK backend API: ${err.message}`);
-    });
-}
-
-function detectBrand(cmd) {
-  const c = cmd.toLowerCase();
-  if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
-  if (c.includes('minimax')) return 'minimax';
-  if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-  if (c.includes('antigravity') || c.includes('rtk')) return 'antigravity';
-  return 'claude'; // default provider
 }
 
 // Run application!

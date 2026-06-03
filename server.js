@@ -1,7 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { exec, execFile } = require('child_process');
+const { exec } = require('child_process');
 
 const PORT = 3000;
 const STATIC_ROOT = path.resolve(__dirname);
@@ -15,7 +15,6 @@ const MIME_TYPES = {
 };
 
 const homeDir = process.env.HOME || '/Users/lifetofree';
-const DB_PATH = process.env.RTK_DB_PATH || path.join(homeDir, 'Library/Application Support/rtk/history.db');
 
 // Mask secrets before sending to the browser — never expose full keys in JS memory/DOM.
 function maskSecret(val) {
@@ -36,27 +35,6 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
     res.end();
-    return;
-  }
-
-  // API Endpoint: Get RTK Database Commands
-  if (req.method === 'GET' && req.url === '/api/rtk') {
-    const query = "SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms FROM commands ORDER BY timestamp DESC LIMIT 200";
-
-    // Use execFile to avoid shell injection — args passed directly, no shell expansion
-    execFile('sqlite3', ['-json', DB_PATH, query], (error, stdout) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      if (error) {
-        res.end(JSON.stringify({ error: error.message, commands: [] }));
-        return;
-      }
-      try {
-        const parsed = stdout.trim() ? JSON.parse(stdout) : [];
-        res.end(JSON.stringify({ commands: parsed }));
-      } catch (e) {
-        res.end(JSON.stringify({ error: 'Parse failed', commands: [], raw: stdout }));
-      }
-    });
     return;
   }
 
