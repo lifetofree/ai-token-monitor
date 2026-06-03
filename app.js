@@ -1,0 +1,1080 @@
+// AI Token Monitor Application JavaScript
+
+// 1. CONSTANTS & METADATA
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Brand color source of truth lives in styles.css. Read from CSS custom properties
+// so light/dark themes and any palette tweak flow through to JS automatically.
+function getBrandColor(key) {
+  if (typeof window === 'undefined') return '#94a3b8';
+  const val = getComputedStyle(document.documentElement).getPropertyValue(`--color-${key}`).trim();
+  return val || '#94a3b8';
+}
+
+const FALLBACK_BRAND_COLOR = '#94a3b8';
+
+const DEFAULT_BRAND_METADATA = {
+  gemini: { name: 'Gemini', inputCost: 1.25, outputCost: 5.00, color: 'var(--color-gemini)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
+  antigravity: { name: 'Antigravity', inputCost: 0.80, outputCost: 3.00, color: 'var(--color-antigravity)', limit: 40.00, limit5h: 1.50, limitWeekly: 12.00, windowLabel: '5-Hour' },
+  claude: { name: 'Claude', inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)', limit: 100.00, limit5h: 5.00, limitWeekly: 30.00, windowLabel: '5-Hour' },
+  minimax: { name: 'Minimax', inputCost: 1.00, outputCost: 4.00, color: 'var(--color-minimax)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
+  glm: { name: 'GLM', inputCost: 0.50, outputCost: 2.00, color: 'var(--color-glm)', limit: 20.00, limit5h: 0.80, limitWeekly: 6.00, windowLabel: '5-Hour' }
+};
+
+// State variables
+let state = {
+  brandMetadata: JSON.parse(localStorage.getItem('atm_brand_metadata')) || JSON.parse(JSON.stringify(DEFAULT_BRAND_METADATA)),
+  requests: JSON.parse(localStorage.getItem('atm_requests')) || [],
+  realCommands: [],  // Real-mode data lives here — never mixed with sim `requests`
+  isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
+  theme: localStorage.getItem('atm_theme') || 'light',
+  currentSort: { key: 'cost', direction: 'desc' },
+  monitorMode: localStorage.getItem('atm_monitor_mode') || 'real'
+};
+
+// Migration: Ensure new fields exist in loaded state (older localStorage payloads)
+Object.keys(state.brandMetadata).forEach(bKey => {
+  const def = DEFAULT_BRAND_METADATA[bKey];
+  Object.keys(def).forEach(field => {
+    if (state.brandMetadata[bKey][field] === undefined) {
+      state.brandMetadata[bKey][field] = def[field];
+    }
+  });
+});
+
+
+// UI Config — single source of truth for tunable constants
+const REFRESH_INTERVAL_SECONDS = 30;
+const MAX_REQUESTS_RETAINED = 500;       // Cap for both sim + real modes (was inconsistent: 500 vs 200)
+const MAX_CONSOLE_LINES = 200;           // DOM prune threshold
+const SIM_DELAY_MIN_MS = 8000;
+const SIM_DELAY_MAX_MS = 20000;
+const SIM_HISTORY_PRELOAD = 40;          // Pre-populated mock requests on first sim run
+const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000;
+const ONE_WEEK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const ROLLING_LIMIT_WARN_PCT = 70;
+const ROLLING_LIMIT_DANGER_PCT = 90;
+let refreshTimer = REFRESH_INTERVAL_SECONDS;
+let refreshTimerIntervalId = null;
+let simulationTimeoutId = null;
+
+// DOM Elements
+const elements = {
+  themeToggleBtn: document.getElementById('theme-toggle-btn'),
+  themeIcon: document.getElementById('theme-icon'),
+  
+  // Timer Elements
+  timerProgressRing: document.getElementById('timer-progress-ring'),
+  timerText: document.getElementById('timer-text'),
+  
+  // Global Stats Elements
+  valTotalRequests: document.getElementById('val-total-requests'),
+  valTotalTokens: document.getElementById('val-total-tokens'),
+  valInputTokens: document.getElementById('val-input-tokens'),
+  valOutputTokens: document.getElementById('val-output-tokens'),
+  valTotalCost: document.getElementById('val-total-cost'),
+  valTotalSavings: document.getElementById('val-total-savings'),
+  valSavedTokens: document.getElementById('val-saved-tokens'),
+  valSavingsPercentage: document.getElementById('val-savings-percentage'),
+  
+  // Section containers
+  brandCardsContainer: document.getElementById('brand-cards-container'),
+  tableBody: document.getElementById('table-body'),
+  consoleLogsStream: document.getElementById('console-logs-stream'),
+  simActivityDot: document.getElementById('sim-activity-dot'),
+  consoleStatusIndicator: document.getElementById('console-status-indicator'),
+  valSimulationSpeed: document.getElementById('val-simulation-speed'),
+  
+  // Control buttons
+  toggleSimBtn: document.getElementById('toggle-sim-btn'),
+  simStatusIcon: document.getElementById('sim-status-icon'),
+  simStatusText: document.getElementById('sim-status-text'),
+  openSimModalBtn: document.getElementById('open-sim-modal-btn'),
+  openSettingsModalBtn: document.getElementById('open-settings-modal-btn'),
+  clearLogsBtn: document.getElementById('clear-logs-btn'),
+  exportCsvBtn: document.getElementById('export-csv-btn'),
+  
+  // Modals
+  settingsModal: document.getElementById('settings-modal'),
+  pricingRatesForm: document.getElementById('pricing-rates-form'),
+  pricingRatesFormFields: document.getElementById('pricing-rates-form-fields'),
+  simModal: document.getElementById('sim-modal'),
+  customRequestForm: document.getElementById('custom-request-form'),
+
+  // Real Monitor Switcher & Tokens
+  monitorModeSelect: document.getElementById('monitor-mode-select'),
+  tabRatesBtn: document.getElementById('tab-rates-btn'),
+  tabTokensBtn: document.getElementById('tab-tokens-btn'),
+  tabContentRates: document.getElementById('tab-content-rates'),
+  tabContentTokens: document.getElementById('tab-content-tokens'),
+  tokenAnthropic: document.getElementById('token-anthropic'),
+  tokenGemini: document.getElementById('token-gemini'),
+  tokenGlm: document.getElementById('token-glm'),
+  tokenMinimax: document.getElementById('token-minimax')
+};
+
+// 2. INITIALIZATION
+function init() {
+  // Apply initial theme
+  document.documentElement.setAttribute('data-theme', state.theme);
+  elements.themeIcon.textContent = state.theme === 'dark' ? '☀️' : '🌙';
+  document.getElementById('footer-year').textContent = new Date().getFullYear();
+  
+  // Set monitor mode selector initial value
+  elements.monitorModeSelect.value = state.monitorMode;
+  updateSimControlsVisibility(state.monitorMode);
+
+  // Build pricing rates input fields in settings modal
+  buildSettingsFormFields();
+  
+  // Bind Event Listeners
+  setupEventListeners();
+  
+  // Setup tabs layout inside monitor modal
+  setupTabs();
+  
+  // Fetch API Keys/tokens from .env
+  fetchAPIKeys();
+  
+  // Start countdown loops
+  startCountdownTimer();
+  
+  if (state.monitorMode === 'real') {
+    elements.simActivityDot.className = 'status-indicator';
+    elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
+    fetchRealRTKData(true);
+  } else {
+    // Render once with whatever sim data we have (could be from a previous session)
+    calculateAndRenderDashboard();
+
+    // Start simulation runner if active
+    if (state.isAutoSimulating) {
+      scheduleNextSimulation();
+      updateSimButtonUI(true);
+    } else {
+      updateSimButtonUI(false);
+    }
+
+    // Pre-populate with some initial mock logs if empty
+    if (state.requests.length === 0) {
+      generateInitialMockHistory();
+    }
+  }
+}
+
+// 3. STATS LOGIC (Calculations & UI Rendering)
+
+// Returns the active dataset for the current monitor mode.
+// Sim mode uses persisted simulated requests; real mode uses commands fetched from RTK.
+// Keeping them separate prevents one mode's data from clobbering the other.
+function getActiveRequests() {
+  return state.monitorMode === 'real' ? state.realCommands : state.requests;
+}
+
+function calculateAndRenderDashboard() {
+  const brandData = {};
+  const now = Date.now();
+  const fiveHoursAgo = now - FIVE_HOUR_WINDOW_MS;
+  const oneWeekAgo = now - ONE_WEEK_WINDOW_MS;
+  const activeRequests = getActiveRequests();
+
+  // Initialize brand accumulator
+  Object.keys(state.brandMetadata).forEach(bKey => {
+    brandData[bKey] = {
+      key: bKey,
+      name: state.brandMetadata[bKey].name,
+      color: getBrandColor(bKey),
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      savedTokens: 0,
+      cost: 0,
+      cost5h: 0,
+      costWeekly: 0,
+      savings: 0,
+      earliest5hTimestamp: null,
+      earliestWeeklyTimestamp: null
+    };
+  });
+
+  let globalRequests = 0;
+  let globalInputTokens = 0;
+  let globalOutputTokens = 0;
+  let globalSavedTokens = 0;
+  let globalCost = 0;
+  let globalSavings = 0;
+
+  // Process request history
+  activeRequests.forEach(req => {
+    const brand = brandData[req.brand];
+    if (brand) {
+      brand.requests++;
+      brand.inputTokens += req.inputTokens;
+      brand.outputTokens += req.outputTokens;
+      brand.savedTokens += req.savedTokens;
+      brand.cost += req.cost;
+      brand.savings += req.savings;
+
+      // Calculate temporal rolling totals
+      const reqTime = req.timestamp;
+      if (reqTime >= fiveHoursAgo) {
+        brand.cost5h += req.cost;
+        if (brand.earliest5hTimestamp === null || reqTime < brand.earliest5hTimestamp) {
+          brand.earliest5hTimestamp = reqTime;
+        }
+      }
+      if (reqTime >= oneWeekAgo) {
+        brand.costWeekly += req.cost;
+        if (brand.earliestWeeklyTimestamp === null || reqTime < brand.earliestWeeklyTimestamp) {
+          brand.earliestWeeklyTimestamp = reqTime;
+        }
+      }
+
+      globalRequests++;
+      globalInputTokens += req.inputTokens;
+      globalOutputTokens += req.outputTokens;
+      globalSavedTokens += req.savedTokens;
+      globalCost += req.cost;
+      globalSavings += req.savings;
+    }
+  });
+
+  // Render Global stats values
+  elements.valTotalRequests.textContent = formatNumber(globalRequests);
+  elements.valTotalTokens.textContent = formatNumber(globalInputTokens + globalOutputTokens);
+  elements.valInputTokens.textContent = formatCompactNumber(globalInputTokens);
+  elements.valOutputTokens.textContent = formatCompactNumber(globalOutputTokens);
+  elements.valTotalCost.textContent = formatCurrency(globalCost);
+  elements.valTotalSavings.textContent = formatCurrency(globalSavings);
+  elements.valSavedTokens.textContent = formatCompactNumber(globalSavedTokens);
+  
+  const totalAttemptedInput = globalInputTokens + globalSavedTokens;
+  const cachingRate = totalAttemptedInput > 0 ? (globalSavedTokens / totalAttemptedInput) * 100 : 0;
+  elements.valSavingsPercentage.textContent = cachingRate.toFixed(1) + '%';
+  
+  // Render Individual Brand Cards
+  renderBrandCards(brandData);
+  
+  // Render Table
+  renderTable(brandData);
+}
+
+function renderBrandCards(brandData) {
+  elements.brandCardsContainer.innerHTML = '';
+  const now = Date.now();
+
+  Object.keys(brandData).forEach(bKey => {
+    const data = brandData[bKey];
+    const meta = state.brandMetadata[bKey];
+    const totalTokens = data.inputTokens + data.outputTokens;
+
+    const limit5h = meta.limit5h || 2.00;
+    const limitWeekly = meta.limitWeekly || 15.00;
+    const windowLabel = meta.windowLabel || '5-Hour';
+
+    const pct5h = Math.min(100, (data.cost5h / limit5h) * 100);
+    const pctWeekly = Math.min(100, (data.costWeekly / limitWeekly) * 100);
+
+    const getLimitStyle = (pct) => {
+      if (pct >= ROLLING_LIMIT_DANGER_PCT) return { class: ' limit-danger', color: 'var(--danger)' };
+      if (pct >= ROLLING_LIMIT_WARN_PCT) return { class: ' limit-warning', color: 'var(--warning)' };
+      return { class: '', color: 'var(--text-muted)' };
+    };
+
+    const style5h = getLimitStyle(pct5h);
+    const styleWeekly = getLimitStyle(pctWeekly);
+
+    // Reset countdown: oldest request in window drops out after window duration.
+    // NOTE: with sustained traffic this is a sliding treadmill — the window never
+    // fully "resets", the oldest single request expires and the next becomes oldest.
+    const rollingTooltip = 'Rolling window: the oldest request in this window falls out at the shown time. With sustained traffic the window slides continuously rather than fully resetting.';
+    const reset5hMs = data.earliest5hTimestamp !== null ? (data.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS) - now : null;
+    const resetWeeklyMs = data.earliestWeeklyTimestamp !== null ? (data.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS) - now : null;
+
+    const reset5hLabel = reset5hMs !== null ? `Resets at ${new Date(now + reset5hMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(reset5hMs)})` : 'no active usage';
+    const resetWeeklyLabel = resetWeeklyMs !== null ? `Resets at ${new Date(now + resetWeeklyMs).toLocaleDateString([], { month: 'short', day: 'numeric' })} ${new Date(now + resetWeeklyMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(resetWeeklyMs)})` : 'no active usage';
+
+    const card = document.createElement('div');
+    card.className = 'card brand-card';
+    card.style.setProperty('--brand-color', getBrandColor(bKey));
+
+    card.innerHTML = `
+      <div class="brand-card-header">
+        <span class="brand-name">${escapeHtml(meta.name)}</span>
+        <span class="brand-cost-title">${data.requests} reqs</span>
+      </div>
+
+      <div class="rolling-limits-stack" style="margin-top: 0; border-top: none; padding-top: 0;">
+        <!-- 5-Hour rolling limit -->
+        <div class="rolling-limit-row">
+          <div class="rolling-limit-row-header">
+            <span class="rolling-limit-title">${escapeHtml(windowLabel)}</span>
+            <span class="rolling-limit-amounts">${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}</span>
+            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;">${pct5h.toFixed(0)}%</span>
+          </div>
+          <div class="brand-limit-bar">
+            <div class="brand-limit-fill${style5h.class}" style="width: ${pct5h}%;"></div>
+          </div>
+          <span class="reset-badge${style5h.class}" title="${escapeHtml(rollingTooltip)}">&#x23F1; ${reset5hLabel}</span>
+        </div>
+
+        <!-- Weekly rolling limit -->
+        <div class="rolling-limit-row">
+          <div class="rolling-limit-row-header">
+            <span class="rolling-limit-title">Weekly</span>
+            <span class="rolling-limit-amounts">${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}</span>
+            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;">${pctWeekly.toFixed(0)}%</span>
+          </div>
+          <div class="brand-limit-bar">
+            <div class="brand-limit-fill${styleWeekly.class}" style="width: ${pctWeekly}%;"></div>
+          </div>
+          <span class="reset-badge${styleWeekly.class}" title="${escapeHtml(rollingTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
+        </div>
+      </div>
+    `;
+    elements.brandCardsContainer.appendChild(card);
+  });
+}
+
+
+
+function renderTable(brandData) {
+  elements.tableBody.innerHTML = '';
+  
+  const items = Object.values(brandData);
+  
+  // Sorting logic
+  const sortKey = state.currentSort.key;
+  const dir = state.currentSort.direction === 'asc' ? 1 : -1;
+  
+  items.sort((a, b) => {
+    let valA, valB;
+    if (sortKey === 'brand') {
+      valA = a.name.toLowerCase();
+      valB = b.name.toLowerCase();
+    } else if (sortKey === 'requests') {
+      valA = a.requests;
+      valB = b.requests;
+    } else if (sortKey === 'input') {
+      valA = a.inputTokens;
+      valB = b.inputTokens;
+    } else if (sortKey === 'output') {
+      valA = a.outputTokens;
+      valB = b.outputTokens;
+    } else if (sortKey === 'saved') {
+      valA = a.savedTokens;
+      valB = b.savedTokens;
+    } else if (sortKey === 'cost') {
+      valA = a.cost;
+      valB = b.cost;
+    } else if (sortKey === 'savings') {
+      valA = a.savings;
+      valB = b.savings;
+    }
+    
+    if (valA < valB) return -1 * dir;
+    if (valA > valB) return 1 * dir;
+    return 0;
+  });
+  
+  items.forEach(data => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>
+        <div class="table-brand-cell">
+          <span class="badge-brand-dot" style="background-color: ${data.color}"></span>
+          ${escapeHtml(data.name)}
+        </div>
+      </td>
+      <td class="font-mono-val">${formatNumber(data.requests)}</td>
+      <td class="font-mono-val">${formatNumber(data.inputTokens)}</td>
+      <td class="font-mono-val">${formatNumber(data.outputTokens)}</td>
+      <td class="font-mono-val text-success">${formatNumber(data.savedTokens)}</td>
+      <td class="font-mono-val">${formatCurrency(data.cost)}</td>
+      <td class="font-mono-val savings-highlight">${formatCurrency(data.savings)}</td>
+    `;
+    elements.tableBody.appendChild(tr);
+  });
+}
+
+// 4. TIMER & AUTO-REFRESH SYSTEM
+function startCountdownTimer() {
+  if (refreshTimerIntervalId) clearInterval(refreshTimerIntervalId);
+  
+  refreshTimer = REFRESH_INTERVAL_SECONDS;
+  updateTimerUI();
+  
+  refreshTimerIntervalId = setInterval(() => {
+    refreshTimer--;
+    updateTimerUI();
+    
+    if (refreshTimer <= 0) {
+      if (state.monitorMode === 'real') {
+        fetchRealRTKData();
+      } else {
+        calculateAndRenderDashboard();
+        logEvent('SYSTEM', 'Completed scheduled dashboard metrics recalculation.');
+      }
+      
+      // Spark visual indicator or countdown reset
+      refreshTimer = REFRESH_INTERVAL_SECONDS;
+    }
+  }, 1000);
+}
+
+function updateTimerUI() {
+  elements.timerText.textContent = `Refreshes in ${refreshTimer}s`;
+  
+  // Circle stroke math (total stroke size is ~44px)
+  const offset = 44 - (44 * (refreshTimer / REFRESH_INTERVAL_SECONDS));
+  elements.timerProgressRing.style.strokeDashoffset = offset;
+}
+
+// 5. SIMULATION SYSTEMS
+function scheduleNextSimulation() {
+  if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
+  if (!state.isAutoSimulating) return;
+
+  // Random delay between SIM_DELAY_MIN_MS and SIM_DELAY_MAX_MS for organic feel
+  const range = SIM_DELAY_MAX_MS - SIM_DELAY_MIN_MS;
+  const nextDelayMs = Math.floor(Math.random() * range) + SIM_DELAY_MIN_MS;
+
+  simulationTimeoutId = setTimeout(() => {
+    if (!state.isAutoSimulating) return;
+
+    triggerRandomMockRequest();
+    scheduleNextSimulation();
+  }, nextDelayMs);
+}
+
+function triggerRandomMockRequest() {
+  const brands = Object.keys(state.brandMetadata);
+  const selectedBrand = brands[Math.floor(Math.random() * brands.length)];
+
+  // Logical token distribution
+  // Input: 500 - 15000 tokens
+  const inputTokens = Math.floor(Math.random() * 14500) + 500;
+  // Output: 100 - 4000 tokens
+  const outputTokens = Math.floor(Math.random() * 3900) + 100;
+  // Cache hit rate (Antigravity has higher caching due to the RTK optimize logic rule, 60-90% savings)
+  const isAntigravity = selectedBrand === 'antigravity';
+  const hitProbability = isAntigravity ? (Math.floor(Math.random() * 30) + 60) : Math.floor(Math.random() * 45); // Antigravity 60-90%, others 0-45%
+
+  const savedTokens = Math.floor(inputTokens * (hitProbability / 100));
+
+  addRequest(selectedBrand, inputTokens, outputTokens, savedTokens);
+}
+
+function addRequest(brandKey, inputTokens, outputTokens, savedTokens) {
+  const metadata = state.brandMetadata[brandKey];
+  if (!metadata) return;
+
+  // Calculate cost
+  const billedInput = Math.max(0, inputTokens - savedTokens);
+
+  // Rate is per 1M tokens
+  const cost = ((billedInput * metadata.inputCost) + (outputTokens * metadata.outputCost)) / 1000000;
+  const savings = ((savedTokens * metadata.inputCost)) / 1000000;
+
+  const newReq = {
+    id: 'req_' + Math.random().toString(36).substring(2, 11),
+    timestamp: Date.now(),
+    brand: brandKey,
+    inputTokens,
+    outputTokens,
+    savedTokens,
+    cost: parseFloat(cost.toFixed(6)),
+    savings: parseFloat(savings.toFixed(6))
+  };
+
+  state.requests.push(newReq);
+
+  // Truncate memory if request log gets extremely large
+  if (state.requests.length > MAX_REQUESTS_RETAINED) {
+    state.requests.shift();
+  }
+
+  // Save state
+  localStorage.setItem('atm_requests', JSON.stringify(state.requests));
+  calculateAndRenderDashboard();
+
+  // Real-time console log updates immediately!
+  const savedPercent = inputTokens > 0 ? ((savedTokens / inputTokens) * 100).toFixed(0) : '0';
+
+  logEvent(
+    metadata.name,
+    `API call: Input <span class="highlight-tokens">${formatCompactNumber(inputTokens)}</span> tkn (Saved <span class="highlight-savings">${formatCompactNumber(savedTokens)}</span> tkn, ${savedPercent}%) | Output <span class="highlight-tokens">${formatCompactNumber(outputTokens)}</span> tkn. Cost: <span class="highlight-cost">${formatCurrency(cost)}</span> (Saved <span class="highlight-savings">${formatCurrency(savings)}</span>)`
+  );
+}
+
+function generateInitialMockHistory() {
+  logEvent('SYSTEM', 'Generating pre-populated analytics history...');
+
+  const brands = Object.keys(state.brandMetadata);
+  // Generate SIM_HISTORY_PRELOAD logs spread over the last 2 days
+  for (let i = 0; i < SIM_HISTORY_PRELOAD; i++) {
+    const brandKey = brands[Math.floor(Math.random() * brands.length)];
+    const metadata = state.brandMetadata[brandKey];
+
+    const inputTokens = Math.floor(Math.random() * 8000) + 400;
+    const outputTokens = Math.floor(Math.random() * 2000) + 100;
+    const isAntigravity = brandKey === 'antigravity';
+    const hitProbability = isAntigravity ? (Math.floor(Math.random() * 30) + 60) : Math.floor(Math.random() * 35);
+    const savedTokens = Math.floor(inputTokens * (hitProbability / 100));
+
+    const billedInput = Math.max(0, inputTokens - savedTokens);
+    const cost = ((billedInput * metadata.inputCost) + (outputTokens * metadata.outputCost)) / 1000000;
+    const savings = ((savedTokens * metadata.inputCost)) / 1000000;
+
+    state.requests.push({
+      id: 'mock_' + i,
+      timestamp: Date.now() - (SIM_HISTORY_PRELOAD - i) * 60000 * 30, // 30 mins intervals
+      brand: brandKey,
+      inputTokens,
+      outputTokens,
+      savedTokens,
+      cost: parseFloat(cost.toFixed(6)),
+      savings: parseFloat(savings.toFixed(6))
+    });
+  }
+
+  localStorage.setItem('atm_requests', JSON.stringify(state.requests));
+  calculateAndRenderDashboard();
+  logEvent('SYSTEM', 'Pre-populated mock history successfully generated.');
+}
+
+// 6. LOGGER EVENT WRITER
+
+// Build a console line via DOM construction (safe — no innerHTML for untrusted data).
+// `parts` is an array of either {html: '...'} (trusted) or {text: '...'} (escaped).
+function appendConsoleLine(source, parts) {
+  const line = document.createElement('div');
+  line.className = 'console-line';
+
+  const timeStr = new Date().toLocaleTimeString();
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'console-timestamp';
+  timeSpan.textContent = `[${timeStr}]`;
+  line.appendChild(timeSpan);
+
+  const brandSpan = document.createElement('span');
+  brandSpan.className = 'console-brand-tag';
+  brandSpan.style.color = (source === 'SYSTEM') ? FALLBACK_BRAND_COLOR : getBrandColor(source.toLowerCase());
+  brandSpan.textContent = `${source}:`;
+  line.appendChild(brandSpan);
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'console-msg';
+  parts.forEach(part => {
+    if (part.html !== undefined) {
+      // Trusted, internal-only content (system events, formatted sim output)
+      msgSpan.insertAdjacentHTML('beforeend', part.html);
+    } else if (part.text !== undefined) {
+      const seg = document.createElement('span');
+      if (part.cls) seg.className = part.cls;
+      seg.textContent = part.text;
+      msgSpan.appendChild(seg);
+    }
+  });
+  line.appendChild(msgSpan);
+
+  elements.consoleLogsStream.appendChild(line);
+  elements.consoleLogsStream.scrollTop = elements.consoleLogsStream.scrollHeight;
+
+  // Prune DOM to prevent unbounded growth
+  while (elements.consoleLogsStream.children.length > MAX_CONSOLE_LINES) {
+    elements.consoleLogsStream.removeChild(elements.consoleLogsStream.firstChild);
+  }
+}
+
+// Trusted HTML helper. Use only for system-generated content; never with user input.
+function logEvent(source, htmlMsg) {
+  appendConsoleLine(source, [{ html: htmlMsg }]);
+}
+
+// Safe helper. Use for any message that includes untrusted text (e.g. shell command strings).
+function logEventSafe(source, segments) {
+  appendConsoleLine(source, segments);
+}
+
+// 7. EVENT LISTENERS SETUP
+function setupEventListeners() {
+  // Theme Switching
+  elements.themeToggleBtn.addEventListener('click', () => {
+    const nextTheme = state.theme === 'light' ? 'dark' : 'light';
+    state.theme = nextTheme;
+    localStorage.setItem('atm_theme', nextTheme);
+    document.documentElement.setAttribute('data-theme', nextTheme);
+    elements.themeIcon.textContent = nextTheme === 'dark' ? '☀️' : '🌙';
+    logEvent('SYSTEM', `UI visual theme toggled to ${nextTheme} mode.`);
+  });
+  
+  // Simulation Control Button
+  elements.toggleSimBtn.addEventListener('click', () => {
+    state.isAutoSimulating = !state.isAutoSimulating;
+    localStorage.setItem('atm_auto_sim', state.isAutoSimulating);
+    
+    updateSimButtonUI(state.isAutoSimulating);
+    
+    if (state.isAutoSimulating) {
+      logEvent('SYSTEM', 'Auto-simulation runner resumes.');
+      scheduleNextSimulation();
+    } else {
+      logEvent('SYSTEM', 'Auto-simulation runner paused.');
+      if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
+    }
+  });
+  
+  // Clear Logs — clears both sim and real data stores
+  elements.clearLogsBtn.addEventListener('click', () => {
+    if (confirm('Are you sure you want to reset all token tracking usage logs? This clears LocalStorage and the real-time command cache.')) {
+      state.requests = [];
+      state.realCommands = [];
+      localStorage.setItem('atm_requests', JSON.stringify([]));
+      calculateAndRenderDashboard();
+      elements.consoleLogsStream.innerHTML = '';
+      logEvent('SYSTEM', 'Reset complete. Usage charts, logs, and real-time cache cleared.');
+    }
+  });
+  
+  // Export CSV
+  elements.exportCsvBtn.addEventListener('click', () => {
+    exportToCSV();
+  });
+  
+  // Modals Open & Close
+  document.querySelectorAll('[data-close]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const modalId = e.currentTarget.getAttribute('data-close');
+      closeModal(modalId);
+    });
+  });
+  
+  elements.openSettingsModalBtn.addEventListener('click', () => {
+    openModal('settings-modal');
+  });
+  
+  elements.openSimModalBtn.addEventListener('click', () => {
+    openModal('sim-modal');
+  });
+  
+  // Close Modals on clicking outside overlay or pressing Escape
+  window.addEventListener('click', (e) => {
+    if (e.target.classList.contains('modal-overlay')) {
+      closeModal(e.target.id);
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.modal-overlay.active').forEach(modal => closeModal(modal.id));
+    }
+  });
+  
+  // Form submission: Pricing Rates & API Keys
+  elements.pricingRatesForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    let hasInvalid = false;
+    Object.keys(state.brandMetadata).forEach(bKey => {
+      const inputVal = parseFloat(document.getElementById(`rate-${bKey}-input`).value);
+      const outputVal = parseFloat(document.getElementById(`rate-${bKey}-output`).value);
+      const limit5hVal = parseFloat(document.getElementById(`rate-${bKey}-limit5h`).value);
+      const limitWeeklyVal = parseFloat(document.getElementById(`rate-${bKey}-limitWeekly`).value);
+
+      // Validate before assignment to prevent NaN propagation
+      if (Number.isFinite(inputVal) && inputVal >= 0) state.brandMetadata[bKey].inputCost = inputVal;
+      else hasInvalid = true;
+      if (Number.isFinite(outputVal) && outputVal >= 0) state.brandMetadata[bKey].outputCost = outputVal;
+      else hasInvalid = true;
+      if (Number.isFinite(limit5hVal) && limit5hVal > 0) state.brandMetadata[bKey].limit5h = limit5hVal;
+      else hasInvalid = true;
+      if (Number.isFinite(limitWeeklyVal) && limitWeeklyVal > 0) state.brandMetadata[bKey].limitWeekly = limitWeeklyVal;
+      else hasInvalid = true;
+    });
+
+    if (hasInvalid) {
+      logEvent('SYSTEM', 'Some pricing fields were invalid; previous values retained for those fields.');
+    }
+
+    localStorage.setItem('atm_brand_metadata', JSON.stringify(state.brandMetadata));
+
+    // Save API keys via per-key endpoint — never echo full keys in browser memory
+    const keyUpdates = [
+      { name: 'ANTHROPIC_API_KEY', value: elements.tokenAnthropic.value.trim() },
+      { name: 'GEMINI_API_KEY', value: elements.tokenGemini.value.trim() },
+      { name: 'GLM_API_KEY', value: elements.tokenGlm.value.trim() },
+      { name: 'MINIMAX_API_KEY', value: elements.tokenMinimax.value.trim() }
+    ];
+
+    Promise.all(keyUpdates.map(k =>
+      fetch(`/api/env/key?key=${encodeURIComponent(k.name)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: k.value })
+      }).then(res => res.json()).catch(err => ({ success: false, error: err.message }))
+    )).then(results => {
+      const failed = results.filter(r => !r.success);
+      if (failed.length === 0) {
+        logEvent('SYSTEM', 'Saved environment API keys/tokens to local .env file.');
+      } else {
+        logEvent('SYSTEM', `Error saving ${failed.length} key(s): ${failed[0].error}`);
+      }
+    });
+
+    closeModal('settings-modal');
+
+    if (state.monitorMode === 'real') {
+      fetchRealRTKData(true);
+    } else {
+      calculateAndRenderDashboard();
+    }
+    logEvent('SYSTEM', 'Custom LLM pricing models, limits, and API keys updated.');
+  });
+
+
+  
+  // Form submission: Custom Request Simulation
+  elements.customRequestForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const brand = document.getElementById('sim-brand-select').value;
+    const input = parseInt(document.getElementById('sim-input-tokens').value);
+    const output = parseInt(document.getElementById('sim-output-tokens').value);
+    const hitRate = parseInt(document.getElementById('sim-caching-hit').value);
+    
+    const saved = Math.floor(input * (hitRate / 100));
+    
+    addRequest(brand, input, output, saved);
+    closeModal('sim-modal');
+    
+    // Force immediate screen refresh for direct user queries
+    calculateAndRenderDashboard();
+  });
+  
+  // Table Sorting headers click
+  document.querySelectorAll('.sortable-header').forEach(header => {
+    header.addEventListener('click', (e) => {
+      const key = e.currentTarget.getAttribute('data-sort');
+      if (state.currentSort.key === key) {
+        // Toggle direction
+        state.currentSort.direction = state.currentSort.direction === 'asc' ? 'desc' : 'asc';
+      } else {
+        state.currentSort.key = key;
+        state.currentSort.direction = 'desc'; // Default to desc for metrics
+      }
+      
+      calculateAndRenderDashboard();
+    });
+  });
+
+  // Monitor Mode Selection Listener
+  elements.monitorModeSelect.addEventListener('change', (e) => {
+    state.monitorMode = e.target.value;
+    localStorage.setItem('atm_monitor_mode', state.monitorMode);
+    logEvent('SYSTEM', `Monitor mode changed to: ${state.monitorMode === 'real' ? 'Real RTK Monitor' : 'Simulation'}`);
+    updateSimControlsVisibility(state.monitorMode);
+
+    if (state.monitorMode === 'real') {
+      if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
+      elements.simActivityDot.className = 'status-indicator';
+      elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
+      fetchRealRTKData(true);
+    } else {
+      updateSimButtonUI(state.isAutoSimulating);
+      if (state.isAutoSimulating) scheduleNextSimulation();
+      calculateAndRenderDashboard();
+    }
+  });
+}
+
+function updateSimControlsVisibility(mode) {
+  const isReal = mode === 'real';
+  elements.toggleSimBtn.style.display = isReal ? 'none' : '';
+  elements.openSimModalBtn.style.display = isReal ? 'none' : '';
+}
+
+function updateSimButtonUI(isActive) {
+  if (isActive) {
+    elements.simStatusIcon.textContent = '⏸';
+    elements.simStatusText.textContent = 'Pause Simulation';
+    elements.simActivityDot.className = 'status-indicator';
+    elements.consoleStatusIndicator.className = 'status-indicator';
+    elements.valSimulationSpeed.textContent = 'Auto-simulation active (10-30s)';
+  } else {
+    elements.simStatusIcon.textContent = '▶';
+    elements.simStatusText.textContent = 'Resume Simulation';
+    elements.simActivityDot.className = 'status-indicator paused';
+    elements.consoleStatusIndicator.className = 'status-indicator paused';
+    elements.valSimulationSpeed.textContent = 'Auto-simulation paused';
+  }
+}
+
+function openModal(id) {
+  const modal = document.getElementById(id);
+  modal.classList.add('active');
+  modal.setAttribute('aria-hidden', 'false');
+  
+  // Focus logic inside modal
+  const focusable = modal.querySelectorAll('input, select, button');
+  if (focusable.length > 0) focusable[0].focus();
+}
+
+function closeModal(id) {
+  const modal = document.getElementById(id);
+  modal.classList.remove('active');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function buildSettingsFormFields() {
+  elements.pricingRatesFormFields.innerHTML = '';
+  
+  Object.keys(state.brandMetadata).forEach(bKey => {
+    const meta = state.brandMetadata[bKey];
+    const brandColor = getBrandColor(bKey);
+
+    const fieldset = document.createElement('div');
+    fieldset.style.border = '1px solid var(--border)';
+    fieldset.style.borderRadius = 'var(--radius-sm)';
+    fieldset.style.padding = '12px';
+
+    fieldset.innerHTML = `
+      <h4 style="font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+        <span class="badge-brand-dot" style="background-color: ${brandColor}"></span>
+        ${escapeHtml(meta.name)}
+      </h4>
+      <div class="form-row-grid">
+        <div class="form-group">
+          <label for="rate-${bKey}-input">Input Rate ($/1M tkn)</label>
+          <input type="number" id="rate-${bKey}-input" step="0.01" min="0" value="${meta.inputCost}">
+        </div>
+        <div class="form-group">
+          <label for="rate-${bKey}-output">Output Rate ($/1M tkn)</label>
+          <input type="number" id="rate-${bKey}-output" step="0.01" min="0" value="${meta.outputCost}">
+        </div>
+      </div>
+      <div class="form-row-grid" style="margin-top: 8px;">
+        <div class="form-group">
+          <label for="rate-${bKey}-limit5h">5h Spend Limit ($)</label>
+          <input type="number" id="rate-${bKey}-limit5h" step="0.1" min="0.1" value="${meta.limit5h || 2.00}">
+        </div>
+        <div class="form-group">
+          <label for="rate-${bKey}-limitWeekly">Weekly Spend Limit ($)</label>
+          <input type="number" id="rate-${bKey}-limitWeekly" step="1" min="1" value="${meta.limitWeekly || 15.00}">
+        </div>
+      </div>
+
+    `;
+    elements.pricingRatesFormFields.appendChild(fieldset);
+  });
+}
+
+
+function exportToCSV() {
+  const rows = [
+    ['Brand', 'Requests', 'Input Tokens', 'Output Tokens', 'Saved Tokens', 'Actual Cost (USD)', 'Saved Cost (USD)']
+  ];
+
+  const activeRequests = getActiveRequests();
+
+  // Compile row values
+  Object.keys(state.brandMetadata).forEach(bKey => {
+    const name = state.brandMetadata[bKey].name;
+    const reqs = activeRequests.filter(r => r.brand === bKey);
+
+    let input = 0, output = 0, saved = 0, cost = 0, savings = 0;
+    reqs.forEach(r => {
+      input += r.inputTokens;
+      output += r.outputTokens;
+      saved += r.savedTokens;
+      cost += r.cost;
+      savings += r.savings;
+    });
+
+    rows.push([
+      name,
+      reqs.length,
+      input,
+      output,
+      saved,
+      cost.toFixed(6),
+      savings.toFixed(6)
+    ]);
+  });
+
+  const csvString = rows.map(e => e.map(val => `"${val}"`).join(",")).join("\n");
+  const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `ai_token_monitor_stats_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  logEvent('SYSTEM', 'Exported token statistics spreadsheet to CSV download.');
+}
+
+// 8. HELPER FORMATTERS
+function formatNumber(num) {
+  return num.toLocaleString();
+}
+
+function formatCompactNumber(num) {
+  if (num >= 1000000) {
+    return (num / 1000000).toFixed(1) + 'M';
+  }
+  if (num >= 1000) {
+    return (num / 1000).toFixed(1) + 'k';
+  }
+  return num.toString();
+}
+
+function formatCurrency(val) {
+  if (val === 0) return '$0.0000';
+  const sign = val < 0 ? '-' : '';
+  const abs = Math.abs(val);
+  if (abs < 0.01) {
+    return `${sign}$${abs.toFixed(5)}`;
+  }
+  return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+}
+
+function formatTimeRemaining(ms) {
+  if (ms <= 0) return 'soon';
+  const days = Math.floor(ms / 86400000);
+  const hours = Math.floor((ms % 86400000) / 3600000);
+  const mins = Math.floor((ms % 3600000) / 60000);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+// 9. REAL MONITOR & ENV UTILITIES
+let lastSeenCommandId = 0;
+
+function setupTabs() {
+  elements.tabRatesBtn.addEventListener('click', () => {
+    elements.tabRatesBtn.classList.add('active');
+    elements.tabTokensBtn.classList.remove('active');
+    elements.tabContentRates.classList.add('active');
+    elements.tabContentTokens.classList.remove('active');
+    elements.tabRatesBtn.setAttribute('aria-selected', 'true');
+    elements.tabTokensBtn.setAttribute('aria-selected', 'false');
+  });
+
+  elements.tabTokensBtn.addEventListener('click', () => {
+    elements.tabTokensBtn.classList.add('active');
+    elements.tabRatesBtn.classList.remove('active');
+    elements.tabContentTokens.classList.add('active');
+    elements.tabContentRates.classList.remove('active');
+    elements.tabTokensBtn.setAttribute('aria-selected', 'true');
+    elements.tabRatesBtn.setAttribute('aria-selected', 'false');
+  });
+}
+
+function fetchAPIKeys() {
+  fetch('/api/env')
+    .then(res => res.json())
+    .then(data => {
+      if (data.ANTHROPIC_API_KEY) elements.tokenAnthropic.value = data.ANTHROPIC_API_KEY;
+      if (data.GEMINI_API_KEY) elements.tokenGemini.value = data.GEMINI_API_KEY;
+      if (data.GLM_API_KEY) elements.tokenGlm.value = data.GLM_API_KEY;
+      if (data.MINIMAX_API_KEY) elements.tokenMinimax.value = data.MINIMAX_API_KEY;
+    })
+    .catch(err => console.error('Failed to load local API keys from backend:', err));
+}
+
+function fetchRealRTKData(forceRefresh = false) {
+  if (forceRefresh) lastSeenCommandId = 0;
+  fetch('/api/rtk')
+    .then(res => res.json())
+    .then(data => {
+      if (data.error) {
+        logEvent('SYSTEM', `RTK load status: ${data.error}`);
+        return;
+      }
+
+      const commands = data.commands || [];
+      const mappedRequests = [];
+
+      // Sort by timestamp ascending to process history chronologically
+      const sortedCmds = [...commands].sort((a, b) => a.id - b.id);
+
+      const isInitialLoad = lastSeenCommandId === 0;
+      const recentLogThreshold = isInitialLoad ? Math.max(0, sortedCmds.length - 15) : 0;
+
+      sortedCmds.forEach((cmd, idx) => {
+        const brandKey = detectBrand(cmd.original_cmd);
+        const meta = state.brandMetadata[brandKey];
+
+        const billedInput = Math.max(0, cmd.input_tokens - cmd.saved_tokens);
+        const cost = ((billedInput * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
+        const savings = (cmd.saved_tokens * meta.inputCost) / 1000000;
+
+        mappedRequests.push({
+          id: 'rtk_' + cmd.id,
+          timestamp: new Date(cmd.timestamp).getTime(),
+          brand: brandKey,
+          inputTokens: cmd.input_tokens,
+          outputTokens: cmd.output_tokens,
+          savedTokens: cmd.saved_tokens,
+          cost: parseFloat(cost.toFixed(6)),
+          savings: parseFloat(savings.toFixed(6)),
+          cmdText: cmd.original_cmd
+        });
+
+        // On initial load, log the most recent 15 commands to populate the feed.
+        // On subsequent refreshes, log only genuinely new commands.
+        const shouldLog = isInitialLoad ? (idx >= recentLogThreshold) : (cmd.id > lastSeenCommandId);
+        if (shouldLog) {
+          const savedPercent = cmd.input_tokens > 0 ? ((cmd.saved_tokens / cmd.input_tokens) * 100).toFixed(0) : '0';
+          logEventSafe(meta.name, [
+            { text: '[Real] "' },
+            { text: cmd.original_cmd },
+            { text: '" | In: ' },
+            { text: formatCompactNumber(cmd.input_tokens), cls: 'highlight-tokens' },
+            { text: ` (Saved ${savedPercent}%) | Out: ` },
+            { text: formatCompactNumber(cmd.output_tokens), cls: 'highlight-tokens' },
+            { text: '. Cost: ' },
+            { text: formatCurrency(cost), cls: 'highlight-cost' }
+          ]);
+        }
+      });
+
+      if (sortedCmds.length > 0) {
+        lastSeenCommandId = sortedCmds[sortedCmds.length - 1].id;
+      }
+
+      // Real-mode data lives in its own store; do NOT clobber sim `state.requests`.
+      // Apply the same retention cap as sim mode.
+      if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
+        state.realCommands = state.realCommands.slice(-MAX_REQUESTS_RETAINED);
+      }
+      state.realCommands = mappedRequests;
+      if (state.monitorMode === 'real') {
+        calculateAndRenderDashboard();
+      }
+    })
+    .catch(err => {
+      logEvent('SYSTEM', `Failed to connect to RTK backend API: ${err.message}`);
+    });
+}
+
+function detectBrand(cmd) {
+  const c = cmd.toLowerCase();
+  if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
+  if (c.includes('minimax')) return 'minimax';
+  if (c.includes('glm') || c.includes('zhipu')) return 'glm';
+  if (c.includes('antigravity') || c.includes('rtk')) return 'antigravity';
+  return 'claude'; // default provider
+}
+
+// Run application!
+document.addEventListener('DOMContentLoaded', init);

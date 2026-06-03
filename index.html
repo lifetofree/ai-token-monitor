@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Token Monitor - Real-Time Multi-Brand Usage Dashboard</title>
+  <meta name="description" content="A real-time token monitor dashboard analyzing cost, usage, and caching optimization across multiple LLM brands including Gemini, Antigravity, Claude, Minimax, and GLM.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+</head>
+<body>
+  <div class="container">
+    <!-- Header Area -->
+    <header role="banner">
+      <div class="header-title-area">
+        <h1>
+          <span class="badge-brand-dot" style="background-color: var(--primary);"></span>
+          AI Token Monitor
+        </h1>
+        <p>Real-time token metrics, caching performance, and developer operations cost savings</p>
+      </div>
+      <div class="header-controls">
+        <!-- Live Countdown Indicator -->
+        <div class="timer-container" id="refresh-timer-widget" title="Dashboard refreshes every 30 seconds">
+          <div class="timer-circle">
+            <svg>
+              <circle class="circle-bg" cx="9" cy="9" r="7"></circle>
+              <circle class="circle-progress" id="timer-progress-ring" cx="9" cy="9" r="7"></circle>
+            </svg>
+          </div>
+          <span id="timer-text">Refreshes in 30s</span>
+        </div>
+
+        <!-- Mode Switcher -->
+        <select id="monitor-mode-select" class="btn" style="padding: 8px 12px; font-size: 13px;" title="Select between real RTK monitor and mock simulation data">
+          <option value="sim">Mode: Simulation</option>
+          <option value="real" selected>Mode: Real RTK Monitor</option>
+        </select>
+
+        <!-- Simulation Toggle Button -->
+        <button id="toggle-sim-btn" class="btn" title="Toggle background traffic generation">
+          <span id="sim-status-icon">⏸</span>
+          <span id="sim-status-text">Pause Simulation</span>
+        </button>
+
+
+        <!-- Actions -->
+        <button id="open-sim-modal-btn" class="btn btn-primary" title="Trigger a custom mock API request">
+          <span>⚡</span> Send Custom Request
+        </button>
+        
+        <button id="open-settings-modal-btn" class="btn" title="Configure cost rates for LLM brands">
+          <span>⚙️</span> Customize Rates
+        </button>
+
+        <button id="clear-logs-btn" class="btn btn-danger-outline" title="Clear all local data and request history">
+          <span>🗑️</span> Reset Data
+        </button>
+
+        <!-- Theme Toggle -->
+        <button id="theme-toggle-btn" class="btn" aria-label="Toggle visual theme (light/dark mode)">
+          <span id="theme-icon">🌙</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Top-Level Stats Summary Cards -->
+    <main id="main-content" role="main">
+      <section class="stats-grid" aria-label="Global Usage Statistics Summary">
+        <div class="card" id="stat-total-requests">
+          <div class="stat-card-title">Total API Requests</div>
+          <div class="stat-card-value" id="val-total-requests">0</div>
+          <div class="stat-card-sub">
+            <span class="status-indicator" id="sim-activity-dot"></span>
+            <span id="val-simulation-speed">Running auto-simulation</span>
+          </div>
+        </div>
+
+        <div class="card" id="stat-total-tokens">
+          <div class="stat-card-title">Total Tokens Consumed</div>
+          <div class="stat-card-value" id="val-total-tokens">0</div>
+          <div class="stat-card-sub">
+            <span>In: <strong id="val-input-tokens">0</strong> &nbsp;|&nbsp; Out: <strong id="val-output-tokens">0</strong></span>
+          </div>
+        </div>
+
+        <div class="card" id="stat-total-cost">
+          <div class="stat-card-title">Estimated Total Cost</div>
+          <div class="stat-card-value" id="val-total-cost">$0.0000</div>
+          <div class="stat-card-sub">
+            <span>Calculated from live brand pricing models</span>
+          </div>
+        </div>
+
+        <div class="card" id="stat-total-savings">
+          <div class="stat-card-title">Caching & Proxy Savings</div>
+          <div class="stat-card-value savings-highlight" id="val-total-savings">$0.0000</div>
+          <div class="stat-card-sub">
+            <span>Saved <strong id="val-saved-tokens">0</strong> tokens (<strong id="val-savings-percentage">0%</strong> caching hit rate)</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Middle Grid: Brand Cards -->
+      <section class="brands-section" style="margin-top: 24px;" aria-label="Brand Performance">
+        <!-- Individual Brands Cost Cards -->
+        <div class="brand-detail-grid" id="brand-cards-container">
+          <!-- Dynamically populated via app.js -->
+        </div>
+      </section>
+
+
+      <!-- Bottom Grid: Detailed Table -->
+      <section class="table-section" style="margin-top: 24px;" aria-label="Detailed Brand Usage Table">
+        <div class="chart-panel-header">
+          <h2 class="chart-panel-title">Detailed Token Usage Metrics</h2>
+          <button id="export-csv-btn" class="btn" style="padding: 4px 8px; font-size: 12px;" title="Export table statistics as CSV">
+            📥 Export CSV
+          </button>
+        </div>
+        <div class="table-wrapper">
+          <table id="token-metrics-table">
+            <thead>
+              <tr>
+                <th class="sortable-header" data-sort="brand">Brand</th>
+                <th class="sortable-header" data-sort="requests">Requests</th>
+                <th class="sortable-header" data-sort="input">Input Tokens</th>
+                <th class="sortable-header" data-sort="output">Output Tokens</th>
+                <th class="sortable-header" data-sort="saved">Tokens Saved</th>
+                <th class="sortable-header" data-sort="cost">Actual Cost</th>
+                <th class="sortable-header" data-sort="savings">Saved Costs</th>
+              </tr>
+            </thead>
+            <tbody id="table-body">
+              <!-- Dynamically populated via app.js -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Logging Stream Console Component -->
+      <section class="console-section" style="margin-top: 24px;" aria-label="Live Developer Log Monitor">
+        <div class="console-header">
+          <div class="console-title-area">
+            <span class="status-indicator" id="console-status-indicator"></span>
+            <h2 class="chart-panel-title" style="font-size: 14px;">Live Request Log Feed</h2>
+          </div>
+          <span style="font-size: 11px; color: var(--text-muted);">Real-time events (refreshes 30s)</span>
+        </div>
+        <div class="console-body" id="console-logs-stream">
+          <div class="console-line">
+            <span class="console-timestamp">[00:00:00]</span>
+            <span class="console-msg">System initialized. Awaiting API request stream...</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer Meta Details -->
+    <footer role="contentinfo">
+      <p>© adduckivity <span id="footer-year"></span></p>
+    </footer>
+  </div>
+
+  <!-- Modal overlay for Customize Rates settings -->
+  <div class="modal-overlay" id="settings-modal" aria-hidden="true" role="dialog" aria-labelledby="settings-modal-title">
+    <div class="modal-content" style="max-width: 550px;">
+      <div class="modal-header">
+        <h3 id="settings-modal-title">Monitor Settings</h3>
+        <button class="modal-close-btn" data-close="settings-modal" aria-label="Close dialog">&times;</button>
+      </div>
+      <form id="pricing-rates-form">
+        <div class="modal-body">
+          <!-- Tab Navigation -->
+          <div class="tab-container" role="tablist">
+            <button type="button" class="tab-btn active" id="tab-rates-btn" role="tab" aria-selected="true" aria-controls="tab-content-rates">Rates & Limits</button>
+            <button type="button" class="tab-btn" id="tab-tokens-btn" role="tab" aria-selected="false" aria-controls="tab-content-tokens">API Tokens (Keys)</button>
+          </div>
+
+          <!-- Tab 1 content: Pricing Rates & Limits -->
+          <div class="tab-content active" id="tab-content-rates" role="tabpanel" aria-labelledby="tab-rates-btn">
+            <p class="helper-text">
+              Set your customized prices per **1 Million Tokens** and cost spend budgets for each brand.
+            </p>
+            <div id="pricing-rates-form-fields" style="display: flex; flex-direction: column; gap: 14px;">
+              <!-- Dynamically populated fields for each brand -->
+            </div>
+          </div>
+
+          <!-- Tab 2 content: API Tokens (Keys) -->
+          <div class="tab-content" id="tab-content-tokens" role="tabpanel" aria-labelledby="tab-tokens-btn">
+            <p class="helper-text">
+              Enter your API keys (tokens) below. Saving them writes a local <code>.env</code> file in your workspace directory, allowing real LLM queries to run with these credentials.
+            </p>
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+              <div class="form-group-row">
+                <label for="token-anthropic">ANTHROPIC_API_KEY</label>
+                <input type="password" id="token-anthropic" placeholder="sk-ant-...">
+              </div>
+              <div class="form-group-row">
+                <label for="token-gemini">GEMINI_API_KEY</label>
+                <input type="password" id="token-gemini" placeholder="AIzaSy...">
+              </div>
+              <div class="form-group-row">
+                <label for="token-glm">GLM_API_KEY (Zhipu)</label>
+                <input type="password" id="token-glm" placeholder="Your GLM Key">
+              </div>
+              <div class="form-group-row">
+                <label for="token-minimax">MINIMAX_API_KEY</label>
+                <input type="password" id="token-minimax" placeholder="Your Minimax Key">
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-close="settings-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Settings</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- Modal overlay for Send Custom Request simulation -->
+  <div class="modal-overlay" id="sim-modal" aria-hidden="true" role="dialog" aria-labelledby="sim-modal-title">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="sim-modal-title">Simulate Custom API Request</h3>
+        <button class="modal-close-btn" data-close="sim-modal" aria-label="Close dialog">&times;</button>
+      </div>
+      <form id="custom-request-form">
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="sim-brand-select">LLM Provider/Brand</label>
+            <select id="sim-brand-select" required>
+              <option value="gemini">Gemini</option>
+              <option value="antigravity">Antigravity</option>
+              <option value="claude">Claude</option>
+              <option value="minimax">Minimax</option>
+              <option value="glm">GLM</option>
+            </select>
+          </div>
+          
+          <div class="form-row-grid">
+            <div class="form-group">
+              <label for="sim-input-tokens">Prompt Input Tokens</label>
+              <input type="number" id="sim-input-tokens" min="10" max="500000" value="1200" required>
+            </div>
+            <div class="form-group">
+              <label for="sim-output-tokens">Response Output Tokens</label>
+              <input type="number" id="sim-output-tokens" min="1" max="64000" value="450" required>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="sim-caching-hit">Proxy Caching Hit Rate (%)</label>
+            <input type="number" id="sim-caching-hit" min="0" max="100" value="40" required>
+            <small style="font-size: 11px; color: var(--text-muted);">
+              Percent of input tokens served from cache (0% input cost).
+            </small>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-close="sim-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Fire Request</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
