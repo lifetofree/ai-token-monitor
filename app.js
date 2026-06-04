@@ -35,7 +35,8 @@ let state = {
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
   monitorMode: localStorage.getItem('atm_monitor_mode') || 'real',
-  currentSort: { key: 'brand', direction: 'asc' }
+  currentSort: { key: 'brand', direction: 'asc' },
+  activeProvider: localStorage.getItem('atm_active_provider') || 'claude'
 };
 
 // Migration: Ensure new brands and fields exist in loaded state (older localStorage payloads)
@@ -114,6 +115,7 @@ function initElements() {
     openSimModalBtn: document.getElementById('open-sim-modal-btn'),
     openSettingsModalBtn: document.getElementById('open-settings-modal-btn'),
     clearLogsBtn: document.getElementById('clear-logs-btn'),
+    activeProviderSelect: document.getElementById('active-provider-select'),
     exportCsvBtn: document.getElementById('export-csv-btn'),
 
     // Modals
@@ -162,6 +164,11 @@ function init() {
   // Fetch API Keys/tokens from .env
   fetchAPIKeys();
   fetchBrandQuotas();
+  
+  // Restore active provider selection
+  if (elements.activeProviderSelect) {
+    elements.activeProviderSelect.value = state.activeProvider;
+  }
   
   // Start countdown loops
   startCountdownTimer();
@@ -693,6 +700,14 @@ function setupEventListeners() {
       logEvent('SYSTEM', 'Auto-simulation runner paused.');
       if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
     }
+  });
+
+  // Active Provider selector — tags all incoming RTK commands with this brand
+  if (elements.activeProviderSelect) elements.activeProviderSelect.addEventListener('change', (e) => {
+    state.activeProvider = e.target.value;
+    localStorage.setItem('atm_active_provider', state.activeProvider);
+    calculateAndRenderDashboard();
+    logEvent('SYSTEM', `Active provider set to ${state.brandMetadata[state.activeProvider]?.name || state.activeProvider}`);
   });
   
   // Clear Logs — clears both sim and real data stores
@@ -1276,8 +1291,10 @@ function detectBrand(cmd) {
   if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
   if (c.includes('minimax')) return 'minimax';
   if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-  // RTK primarily proxies Claude Code tool-use (bash, grep, ls, etc.) — default to claude
-  return 'claude';
+  if (c.includes('claude') || c.includes('anthropic')) return 'claude';
+  // RTK tool-use commands have no brand marker — fall back to the user's
+  // selected active provider so all commands get tagged with the right brand.
+  return state.activeProvider || 'claude';
 }
 
 // Run application!

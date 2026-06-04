@@ -666,47 +666,91 @@ function fetchGeminiQuota(apiKey) {
 }
 
 function fetchGLMQuota(apiKey) {
+  // Uses the Zhipu AI quota monitoring API to get 5-hour token limits
+  // with remaining %, used/total tokens, and reset time.
   return new Promise((resolve) => {
-    const postData = JSON.stringify({
-      model: 'glm-4',
-      messages: [{ role: 'user', content: '.' }],
-      max_tokens: 1
-    });
-
     const req = https.request({
-      hostname: 'open.bigmodel.cn',
-      path: '/api/paas/v4/chat/completions',
-      method: 'POST',
+      hostname: 'bigmodel.cn',
+      path: '/api/monitor/usage/quota/limit',
+      method: 'GET',
       headers: {
-        'authorization': `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength(postData)
+        'Authorization': apiKey,
+        'Content-Type': 'application/json'
       }
     }, (res) => {
       let body = '';
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => {
-        let errorMsg = null;
-        if (res.statusCode >= 400) {
-          try {
-            const parsed = JSON.parse(body);
-            errorMsg = (parsed.error && parsed.error.message) ? parsed.error.message : `HTTP ${res.statusCode}`;
-          } catch (e) {
-            errorMsg = `HTTP ${res.statusCode}`;
+        try {
+          const parsed = JSON.parse(body);
+          if (!parsed.success || parsed.code !== 200) {
+            resolve({
+              remaining: null,
+              limit_value: null,
+              reset_at: null,
+              reset_at_weekly: null,
+              weekly_remaining: null,
+              unit: 'error',
+              raw_json: parsed,
+              error: parsed.msg || `API code ${parsed.code}`
+            });
+            return;
           }
-        }
-        const remaining = parseInt(res.headers['x-ratelimit-remaining-requests'], 10);
-        const limitVal = parseInt(res.headers['x-ratelimit-limit-requests'], 10);
-        const hasHeaders = res.headers['x-ratelimit-remaining-requests'] !== undefined;
 
-        resolve({
-          remaining: isNaN(remaining) ? null : remaining,
-          limit_value: isNaN(limitVal) ? null : limitVal,
-          reset_at: null,
-          unit: hasHeaders ? 'requests' : 'not_exposed',
-          raw_json: res.headers,
-          error: errorMsg
-        });
+          const limits = parsed.data && parsed.data.limits ? parsed.data.limits : [];
+          const tokensLimits = limits.filter(l => l.type === 'TOKENS_LIMIT');
+
+          if (tokensLimits.length === 0) {
+            resolve({
+              remaining: null,
+              limit_value: null,
+              reset_at: null,
+              reset_at_weekly: null,
+              weekly_remaining: null,
+              unit: 'not_exposed',
+              raw_json: parsed,
+              error: 'No TOKENS_LIMIT in response'
+            });
+            return;
+          }
+
+          // The API percentage field IS the used percentage (0-100).
+          // First TOKENS_LIMIT is the 5-hour window.
+          const fiveHour = tokensLimits[0];
+          const remainPct = Math.max(0, 100 - fiveHour.percentage);
+          const resetAt = fiveHour.nextResetTime || null;
+
+          // Second TOKENS_LIMIT (if present) is the longer window (~weekly).
+          let resetAtWeekly = null;
+          let weeklyRemaining = null;
+          if (tokensLimits.length > 1) {
+            const weekly = tokensLimits[1];
+            weeklyRemaining = Math.max(0, 100 - weekly.percentage);
+            resetAtWeekly = weekly.nextResetTime || null;
+          }
+
+          resolve({
+            remaining: remainPct,
+            limit_value: 100,
+            reset_at: resetAt,
+            reset_at_weekly: resetAtWeekly,
+            weekly_remaining: weeklyRemaining,
+            unit: 'percent',
+            raw_json: parsed,
+            error: null
+          });
+        } catch (e) {
+          resolve({
+            remaining: null,
+            limit_value: null,
+            reset_at: null,
+            reset_at_weekly: null,
+            weekly_remaining: null,
+            unit: 'error',
+            raw_json: body.substring(0, 500),
+            error: e.message
+          });
+        }
       });
     });
 
@@ -715,13 +759,14 @@ function fetchGLMQuota(apiKey) {
         remaining: null,
         limit_value: null,
         reset_at: null,
-        unit: 'not_exposed',
+        reset_at_weekly: null,
+        weekly_remaining: null,
+        unit: 'error',
         raw_json: null,
         error: e.message
       });
     });
 
-    req.write(postData);
     req.end();
   });
 }
