@@ -449,7 +449,9 @@ async function seedBrandQuotas(force) {
         allValid = false;
         break;
       }
-      const maxAge = (r.reset_at || r.reset_at_weekly) ? (60 * 60 * 1000) : (60 * 1000);
+      // Shorter cache for fast-reset providers (5h windows expire fast).
+      // MiniMax quota changes every few minutes; refresh every 3 min.
+      const maxAge = (r.reset_at || r.reset_at_weekly) ? (3 * 60 * 1000) : (60 * 1000);
       if (Date.now() - r.seeded_at >= maxAge) {
         allValid = false;
         break;
