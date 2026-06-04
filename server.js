@@ -857,11 +857,9 @@ function fetchMinimaxQuota(apiKey) {
           }
         }
 
-        // MiniMax embeds weekly window fields directly in the same entry (weekly_end_time,
-        // current_weekly_remaining_percent). Fall back to those when no separate weekly entry exists.
         const resetAtWeekly = weeklyEntry
           ? extractEndTime(weeklyEntry)
-          : (primary ? toEpochMs(primary.weekly_end_time || null) : null);
+          : (primary ? extractWeeklyEndTime(primary) : null);
 
         // Detect unit: MiniMax returns percent fields (0-100) rather than
         // a hard count cap, so we synthesize limit_value=100 in that mode
@@ -920,36 +918,53 @@ function isWeeklyEntry(entry, fiveH_MS, sevenD_MS) {
   return delta >= sevenD_MS / 2 && delta <= sevenD_MS * 2;
 }
 
-function extractRemaining(entry) {
-  if (typeof entry.current_interval_remaining_count === 'number') return entry.current_interval_remaining_count;
-  if (typeof entry.current_window_remaining_count === 'number') return entry.current_window_remaining_count;
-  if (typeof entry.remaining_count === 'number') return entry.remaining_count;
-  if (typeof entry.current_interval_remaining_percent === 'number') return entry.current_interval_remaining_percent;
-  if (typeof entry.usage_percent === 'number') return entry.usage_percent;
-  if (typeof entry.usagePercent === 'number') return entry.usagePercent;
+function pickField(obj, ...keys) {
+  for (const k of keys) {
+    if (obj != null && obj[k] != null) return obj[k];
+  }
   return null;
+}
+
+function extractRemaining(entry) {
+  return pickField(entry,
+    'current_interval_remaining_percent',
+    'current_remaining_percent',
+    'current_remaining_count',
+    'current_interval_remaining_count',
+    'current_window_remaining_count',
+    'remaining_count',
+    'usage_percent',
+    'usagePercent'
+  );
 }
 
 function extractWeeklyRemaining(entry) {
-  if (typeof entry.current_weekly_remaining_percent === 'number') return entry.current_weekly_remaining_percent;
-  if (typeof entry.current_weekly_remaining_count === 'number') return entry.current_weekly_remaining_count;
-  if (typeof entry.weekly_remaining_percent === 'number') return entry.weekly_remaining_percent;
-  if (typeof entry.weekly_remaining_count === 'number') return entry.weekly_remaining_count;
-  if (typeof entry.weekly_usage_percent === 'number') return entry.weekly_usage_percent;
-  if (typeof entry.weeklyUsagePercent === 'number') return entry.weeklyUsagePercent;
-  return null;
+  return pickField(entry,
+    'current_weekly_remaining_percent',
+    'current_week_remaining_percent',
+    'weekly_remaining_percent',
+    'weekly_remaining_count'
+  );
 }
 
 function extractLimit(entry) {
-  if (typeof entry.current_window_quota_count === 'number') return entry.current_window_quota_count;
-  if (typeof entry.window_quota_count === 'number') return entry.window_quota_count;
-  if (typeof entry.quota_count === 'number') return entry.quota_count;
-  if (typeof entry.total_count === 'number') return entry.total_count;
-  return null;
+  return pickField(entry,
+    'current_interval_total_count',
+    'current_window_quota_count',
+    'window_quota_count',
+    'quota_count',
+    'total_count',
+    'limit',
+    'quota'
+  );
 }
 
 function extractEndTime(entry) {
-  return toEpochMs(entry.end_time);
+  return toEpochMs(pickField(entry, 'end_time', 'current_end_time', 'reset_at', 'interval_end_time'));
+}
+
+function extractWeeklyEndTime(entry) {
+  return toEpochMs(pickField(entry, 'weekly_end_time', 'current_week_end_time', 'week_end_time'));
 }
 
 const BRAND_FETCHERS = {
