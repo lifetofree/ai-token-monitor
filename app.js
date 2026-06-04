@@ -34,9 +34,7 @@ let state = {
   realCommands: [],
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
-  monitorMode: localStorage.getItem('atm_monitor_mode') || 'real',
-  currentSort: { key: 'brand', direction: 'asc' },
-  activeProvider: localStorage.getItem('atm_active_provider') || 'claude'
+  currentSort: { key: 'brand', direction: 'asc' }
 };
 
 // Migration: Ensure new brands and fields exist in loaded state (older localStorage payloads)
@@ -115,7 +113,6 @@ function initElements() {
     openSimModalBtn: document.getElementById('open-sim-modal-btn'),
     openSettingsModalBtn: document.getElementById('open-settings-modal-btn'),
     clearLogsBtn: document.getElementById('clear-logs-btn'),
-    activeProviderSelect: document.getElementById('active-provider-select'),
     exportCsvBtn: document.getElementById('export-csv-btn'),
 
     // Modals
@@ -124,8 +121,6 @@ function initElements() {
     pricingRatesFormFields: document.getElementById('pricing-rates-form-fields'),
     simModal: document.getElementById('sim-modal'),
     customRequestForm: document.getElementById('custom-request-form'),
-
-    monitorModeSelect: document.getElementById('monitor-mode-select'),
 
     // Settings Tabs & Tokens
     tabRatesBtn: document.getElementById('tab-rates-btn'),
@@ -149,52 +144,26 @@ function init() {
   const footerYear = document.getElementById('footer-year');
   if (footerYear) footerYear.textContent = new Date().getFullYear();
 
-  if (elements.monitorModeSelect) elements.monitorModeSelect.value = state.monitorMode;
-  updateSimModeVisibility();
-
   // Build pricing rates input fields in settings modal
   buildSettingsFormFields();
-  
+
   // Bind Event Listeners
   setupEventListeners();
-  
+
   // Setup tabs layout inside monitor modal
   setupTabs();
-  
+
   // Fetch API Keys/tokens from .env
   fetchAPIKeys();
   fetchBrandQuotas();
-  
-  // Restore active provider selection
-  if (elements.activeProviderSelect) {
-    elements.activeProviderSelect.value = state.activeProvider;
-  }
-  
+
   // Start countdown loops
   startCountdownTimer();
-  
-  if (state.monitorMode === 'real') {
-    if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
-    if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
-    fetchRealRTKData(true);
-    connectRTKStream();
-  } else {
-    // Render once with whatever sim data we have (could be from a previous session)
-    calculateAndRenderDashboard();
 
-    // Start simulation runner if active
-    if (state.isAutoSimulating) {
-      scheduleNextSimulation();
-      updateSimButtonUI(true);
-    } else {
-      updateSimButtonUI(false);
-    }
-
-    // Pre-populate with some initial mock logs if empty
-    if (state.requests.length === 0) {
-      generateInitialMockHistory();
-    }
-  }
+  if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
+  if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
+  fetchRealRTKData(true);
+  connectRTKStream();
 }
 
 // 3. STATS LOGIC (Calculations & UI Rendering)
@@ -487,12 +456,7 @@ function startCountdownTimer() {
     updateTimerUI();
     
     if (refreshTimer <= 0) {
-      if (state.monitorMode === 'real') {
-        fetchRealRTKData();
-      } else {
-        calculateAndRenderDashboard();
-        logEvent('SYSTEM', 'Completed scheduled dashboard metrics recalculation.');
-      }
+      fetchRealRTKData();
       fetchBrandQuotas();
 
       // Spark visual indicator or countdown reset
@@ -702,14 +666,6 @@ function setupEventListeners() {
     }
   });
 
-  // Active Provider selector — tags all incoming RTK commands with this brand
-  if (elements.activeProviderSelect) elements.activeProviderSelect.addEventListener('change', (e) => {
-    state.activeProvider = e.target.value;
-    localStorage.setItem('atm_active_provider', state.activeProvider);
-    calculateAndRenderDashboard();
-    logEvent('SYSTEM', `Active provider set to ${state.brandMetadata[state.activeProvider]?.name || state.activeProvider}`);
-  });
-  
   // Clear Logs — clears both sim and real data stores
   if (elements.clearLogsBtn) elements.clearLogsBtn.addEventListener('click', () => {
     if (confirm('Are you sure you want to reset all token tracking usage logs? This clears LocalStorage.')) {
@@ -845,30 +801,6 @@ function setupEventListeners() {
       
       calculateAndRenderDashboard();
     });
-  });
-
-  // Monitor Mode Selection Listener
-  if (elements.monitorModeSelect) elements.monitorModeSelect.addEventListener('change', (e) => {
-    state.monitorMode = e.target.value;
-    localStorage.setItem('atm_monitor_mode', state.monitorMode);
-    logEvent('SYSTEM', `Monitor mode changed to: ${state.monitorMode === 'real' ? 'Real RTK Monitor' : 'Simulation'}`);
-
-    if (state.monitorMode === 'real') {
-      if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
-      if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
-      if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
-      fetchRealRTKData(true);
-      connectRTKStream();
-      fetchBrandQuotas();
-    } else {
-      if (rtkEventSource) {
-        rtkEventSource.close();
-        rtkEventSource = null;
-      }
-      updateSimButtonUI(state.isAutoSimulating);
-      if (state.isAutoSimulating) scheduleNextSimulation();
-      calculateAndRenderDashboard();
-    }
   });
 
 }
@@ -1111,19 +1043,12 @@ function triggerSilentQuotaSync(brandKey) {
     });
 }
 
-// Returns the active dataset for the current monitor mode.
 function getActiveRequests() {
-  return state.monitorMode === 'real' ? state.realCommands : state.requests;
+  return state.realCommands;
 }
 
 let lastSeenCommandId = 0;
 let rtkEventSource = null;
-
-function updateSimModeVisibility() {
-  const isReal = state.monitorMode === 'real';
-  if (elements.toggleSimBtn) elements.toggleSimBtn.style.display = isReal ? 'none' : '';
-  if (elements.openSimModalBtn) elements.openSimModalBtn.style.display = isReal ? 'none' : '';
-}
 
 function fetchRealRTKData(forceRefresh = false) {
   if (forceRefresh) lastSeenCommandId = 0;
@@ -1211,9 +1136,7 @@ function fetchRealRTKData(forceRefresh = false) {
       if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
         state.realCommands = state.realCommands.slice(-MAX_REQUESTS_RETAINED);
       }
-      if (state.monitorMode === 'real') {
-        calculateAndRenderDashboard();
-      }
+      calculateAndRenderDashboard();
     })
     .catch(err => {
       logEvent('SYSTEM', `Failed to connect to RTK backend API: ${err.message}`);
@@ -1272,9 +1195,7 @@ function connectRTKStream() {
           { text: formatCurrency(cost), cls: 'highlight-cost' }
         ]);
 
-        if (state.monitorMode === 'real') {
-          calculateAndRenderDashboard();
-        }
+        calculateAndRenderDashboard();
       }
     } catch (e) {
       console.error('Error processing real-time SSE stream packet:', e);
@@ -1292,9 +1213,7 @@ function detectBrand(cmd) {
   if (c.includes('minimax')) return 'minimax';
   if (c.includes('glm') || c.includes('zhipu')) return 'glm';
   if (c.includes('claude') || c.includes('anthropic')) return 'claude';
-  // RTK tool-use commands have no brand marker — fall back to the user's
-  // selected active provider so all commands get tagged with the right brand.
-  return state.activeProvider || 'claude';
+  return 'claude';
 }
 
 // Run application!

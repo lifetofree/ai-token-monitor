@@ -32,26 +32,11 @@
           <span id="timer-text">Refreshes in 30s</span>
         </div>
 
-        <!-- Mode Switcher -->
-        <select id="monitor-mode-select" class="btn" style="padding: 8px 12px; font-size: 13px;" title="Select between real RTK monitor and mock simulation data">
-          <option value="sim">Mode: Simulation</option>
-          <option value="real">Mode: Real RTK Monitor</option>
-        </select>
-
         <!-- Simulation Toggle Button -->
-        <button id="toggle-sim-btn" class="btn" title="Toggle background traffic generation">
+        <button id="toggle-sim-btn" class="btn" title="Toggle background traffic generation" style="display:none;">
           <span id="sim-status-icon">⏸</span>
           <span id="sim-status-text">Pause Simulation</span>
         </button>
-
-
-        <!-- Actions -->
-        <select id="active-provider-select" class="btn" title="Select which LLM provider is driving RTK commands">
-          <option value="claude">Claude</option>
-          <option value="gemini">Gemini</option>
-          <option value="minimax">Minimax</option>
-          <option value="glm">GLM</option>
-        </select>
 
         <button id="open-sim-modal-btn" class="btn btn-primary" title="Trigger a custom mock API request">
           <span>⚡</span> Send Custom Request
