@@ -179,6 +179,12 @@ button.btn-danger-outline:hover {
   border-radius: 50px;
 }
 
+#timer-text {
+  display: inline-block;
+  min-width: 120px;
+  white-space: nowrap;
+}
+
 .timer-circle {
   position: relative;
   width: 18px;
