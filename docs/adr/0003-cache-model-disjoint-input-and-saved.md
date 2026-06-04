@@ -4,7 +4,16 @@ The codebase had two competing cache models in the same render path. The cost fo
 
 ## Status
 
-Accepted, **applied in code**. We have resolved the cache model inconsistency by adopting the disjoint model throughout the code path. All cost calculations (`addRequest`, `fetchRealRTKData`, `connectRTKStream`, `generateInitialMockHistory`) use disjoint parameters directly, where `inputTokens` is by definition the billed amount.
+Accepted, **applied in code** across all four write paths:
+
+- `addRequest(brandKey, inputTokens, outputTokens, savedTokens)` — simulator path
+- `fetchRealRTKData()` and `connectRTKStream()` — Real RTK path (via `cmd.input_tokens`, `cmd.output_tokens`, `cmd.saved_tokens`)
+- `generateInitialMockHistory()` — pre-populated history path
+- `triggerRandomMockRequest()` — random simulator path
+
+In all paths, `inputTokens` is by definition the billed amount; `savedTokens` is disjoint. `cost = (inputTokens * inputRate + outputTokens * outputRate) / 1M`; `savings = (savedTokens * inputRate) / 1M`; `cacheRate = savedTokens / (inputTokens + savedTokens)` (displayed as 0-100%).
+
+A Reviewer R5 audit of the pre-populated `SIM_HISTORY_PRELOAD` rows remains open (rows generated before the migration may look inconsistent).
 
 ## Considered Options
 

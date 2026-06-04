@@ -6,21 +6,25 @@
 
 A two-process, single-machine system:
 
-- **Browser process**: `index.html` + `styles.css` + `app.js`. Renders the dashboard; reads/writes `localStorage`; renders synthetic traffic via the in-app simulator.
-- **Server process**: `server.js`. Static file server + three JSON API endpoints for `.env` read/write. Reads and writes `.env` on demand; never persists anything else.
+- **Browser process**: `index.html` + `styles.css` + `app.js`. Renders the dashboard; reads/writes `localStorage`; supports both Real RTK Monitor (default) and Simulation modes; consumes the `/api/seed-quotas` snapshot to drive the API-aware progress bars and reset-time badges.
+- **Server process**: `server.js`. Static file server plus **eight** JSON/SSE endpoints across three concerns:
+  - **`.env` I/O**: `GET /api/env`, `POST /api/env`, `POST /api/env/key`
+  - **Real RTK Monitor**: `GET /api/rtk` (full snapshot), `GET /api/rtk/summary` (aggregate summary), `GET /api/rtk/stream` (SSE for incremental updates)
+  - **Provider-quota cache**: `GET /api/seed-quotas` (cached snapshot), `POST /api/seed-quotas` (force-refresh)
+- **Outbound HTTPS client**: the server's `fetchMinimaxQuota` makes a `GET` to `https://www.minimax.io/v1/token_plan/remains` with `Authorization: Bearer <MINIMAX_API_KEY>`. This is the first outbound integration; no other fetcher makes outbound calls (Claude/GLM read quota from in-band response headers on a probe request).
 
 No build step. No bundler. No transpiler. The browser loads `app.js` directly and executes it as a classic script.
 
-The Real RTK mode, the `/api/rtk` endpoint, the `execFile('sqlite3', …)` invocation, and the SQLite read from `~/Library/Application Support/rtk/history.db` are gone — see `../docs/adr/0005-remove-real-rtk-mode.md`.
+The server **owns** the `brand_quota` SQLite table (idempotent migrations for `reset_at_weekly` and `weekly_remaining`). It **does not own** the RTK `commands` table — that DB is read-only for our purposes.
 
 ## 2. Folder structure
 
 ```
 .
-├── app.js                  # All client logic (~880 lines)
+├── app.js                  # All client logic (~1,200 lines)
 ├── index.html              # Static markup
 ├── styles.css              # Design system
-├── server.js               # Node server (~190 lines)
+├── server.js               # Node server (~750 lines)
 ├── package.json            # Zero dependencies
 ├── favicon.svg             # Static asset (whitelisted)
 ├── .env                    # User API keys (gitignored)
@@ -41,11 +45,20 @@ The Real RTK mode, the `/api/rtk` endpoint, the `execFile('sqlite3', …)` invoc
 │       ├── 0002-unify-request-stores-by-source.md
 │       ├── 0003-cache-model-disjoint-input-and-saved.md
 │       ├── 0004-fixed-rolling-windows.md
-│       └── 0005-remove-real-rtk-mode.md
+│       ├── 0005-remove-real-rtk-mode.md          # SUPERSEDED by 0006
+│       └── 0006-reintroduce-real-rtk-mode.md
 └── .ai.agents/             # Role rules (see *.md)
 ```
 
 There is no `src/`, no `tests/`, no `dist/`. The single-file-per-layer structure is intentional given the project's small surface area.
+
+### Server-side SQLite caches (in `~/Library/Application Support/rtk/history.db`)
+
+| Table | Owner | Purpose | Migrations |
+|---|---|---|---|
+| `commands` | RTK (read-only) | The raw RTK history. The dashboard never writes to it. | n/a |
+| `brand_quota` | dashboard | Provider-quota snapshot per Brand. Idempotent `ALTER TABLE` migrations for `reset_at_weekly` and `weekly_remaining`. | `ADD COLUMN reset_at_weekly INTEGER`, `ADD COLUMN weekly_remaining INTEGER` |
+| `parse_failures` | RTK (read-only) | RTK's own failure log; not consumed by the dashboard. | n/a |
 
 ## 3. Data model
 
@@ -70,61 +83,90 @@ The Brand `antigravity` is removed (see `../docs/adr/0001-drop-antigravity-brand
 ### 3.2 Request
 
 ```ts
+type RequestSource = 'real' | 'sim';
+
 interface Request {
-  id: string;            // e.g. "req_…", "mock_<n>"
+  id: string;            // e.g. "req_…", "mock_<n>", "rtk_<rtkId>"
   timestamp: number;     // epoch ms
   brand: BrandKey;
-  inputTokens: number;   // billed input (per ADR-0003; not yet applied — see status)
+  source: RequestSource; // meaningful again in v1 (dual-monitor); see 0006
+  inputTokens: number;   // billed input (disjoint from savedTokens per ADR-0003; applied)
   outputTokens: number;
-  savedTokens: number;   // cached input; disjoint from inputTokens (per ADR-0003; not yet applied)
+  savedTokens: number;   // cached input; disjoint from inputTokens (per ADR-0003; applied)
   cost: number;          // computed
   savings: number;       // computed
+  cmdText?: string;      // only populated for `source: 'real'` (the RTK `original_cmd`)
 }
 ```
 
-Derived formulas (per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; the cost side is **not yet applied** in code — the current `addRequest` and `generateInitialMockHistory` still use the subset model):
+Derived formulas (disjoint model, per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`, **applied** in `addRequest`, `fetchRealRTKData`, `connectRTKStream`, and `generateInitialMockHistory`):
 
 ```
-cost     = (inputTokens * inputRate + outputTokens * outputRate) / 1_000_000   // disjoint model (target)
-savings  = (savedTokens  * inputRate)                          / 1_000_000
-cacheRate = savedTokens / (inputTokens + savedTokens)   // [0, 1], display as %
+cost       = (inputTokens * inputRate + outputTokens * outputRate) / 1_000_000
+savings    = (savedTokens  * inputRate)                          / 1_000_000
+cacheRate  = savedTokens / (inputTokens + savedTokens)            // [0, 1], display as %
 ```
-
-The `source` and `cmdText` fields from earlier revisions are removed from the active schema; they are reserved for a future Real Mode re-introduction.
 
 ### 3.3 Request store
 
-A single `state.requests: Request[]` array. Retention:
+Two arrays, selected by `state.monitorMode` via `getActiveRequests()`:
 
 ```
-if (state.requests.length > MAX_REQUESTS_RETAINED) {
-  state.requests.shift();
-}
+state.realCommands: Request[]  // source: 'real' — populated by fetchRealRTKData + connectRTKStream
+state.requests:     Request[]  // source: 'sim'  — populated by the simulator and pre-populated history
 ```
 
-`MAX_REQUESTS_RETAINED = 500` is a single global cap; per-source retention is moot while there is only one source. See `../docs/adr/0002-unify-request-stores-by-source.md`.
+Retention is unified at `MAX_REQUESTS_RETAINED = 500`; the cap is applied to whichever array is being appended to. See `../docs/adr/0002-unify-request-stores-by-source.md` (original unification) and `0006-reintroduce-real-rtk-mode.md` (re-split by Source).
 
 ### 3.4 Cursors
 
-- `refreshTimer: number` — the seconds-remaining countdown for the next refresh.
+- `refreshTimer: number` — seconds-remaining countdown for the next refresh.
 - `simulationTimeoutId: number | null` — the in-flight simulator timeout.
+- `lastSeenCommandId: number` — Real RTK cursor; the next SSE/poll only logs commands with `id > lastSeenCommandId`.
+- `sseClients: Response[]` — server-side array of open SSE connections; cleaned up on `req.on('close')`.
 
-`lastSeenCommandId` (the real-mode "log only new commands" cursor) is gone with Real Mode.
-
-### 3.5 Persistence
+### 3.5 Client-side persistence
 
 | Key | Shape | Owner |
 |---|---|---|
-| `atm_requests` | `Request[]` | simulator output |
+| `atm_requests` | `Request[]` | simulator output (`source: 'sim'`) |
 | `atm_brand_metadata` | `Record<BrandKey, BrandMetadata>` | user settings |
 | `atm_theme` | `'light' \| 'dark'` | user settings |
 | `atm_auto_sim` | `'true' \| 'false'` | simulator preference |
+| `atm_monitor_mode` | `'real' \| 'sim'` | user settings (re-introduced; see 0006) |
 
-`atm_monitor_mode` (a pre-Removal key) is no longer read or written. `localStorage` is the only client-side persistence. `.env` is the only server-side mutable state.
+`localStorage` is the only client-side persistence. `.env` is the only user-mutable server-side state.
+
+### 3.6 BrandQuota (server-side cache)
+
+```ts
+interface BrandQuota {
+  brand: BrandKey;
+  remaining: number | null;      // count for "requests" unit, percent (0-100) for "percent" unit
+  limit_value: number | null;    // count or 100 (synthesised cap for percent)
+  reset_at: number | null;       // 5-hour window end, epoch ms
+  reset_at_weekly: number | null;// weekly window end, epoch ms
+  weekly_remaining: number | null;
+  unit: 'requests' | 'percent' | 'not_exposed' | 'missing_key' | 'error';
+  raw_json: object | null;       // full provider response (for debugging)
+  seeded_at: number;             // epoch ms — when this row was last refreshed
+  error: string | null;          // error message when unit === 'error'
+}
+```
+
+`unit` semantics live in **exactly one place** in the client: `computeApiUsedPct()` in `app.js`. The conversion rule is: `percent` → `100 - remaining`; `requests` → `(limit_value - remaining) / limit_value * 100`; `not_exposed`/`missing_key`/`error` → `null` (bar falls back to local spend).
+
+### 3.7 `Request.source` is back in the schema
+
+The `source` field is no longer a vestigial `'sim'` constant. It is set to:
+- `'real'` by `fetchRealRTKData()` and `connectRTKStream()` (mapped from RTK rows via `detectBrand(original_cmd)`)
+- `'sim'` by the simulator and the pre-populated mock history
+
+The `getActiveRequests()` filter selects the active array based on `state.monitorMode`.
 
 ## 4. API contracts
 
-The server exposes three JSON endpoints. All requests/responses are `application/json`; CORS is restricted to localhost.
+All endpoints are JSON (or SSE for `/api/rtk/stream`). CORS is restricted to localhost. `RTK_DB_PATH` env var (if set) overrides the default RTK DB location.
 
 ### 4.1 `GET /api/env`
 
@@ -145,39 +187,96 @@ Missing keys are returned as `""`. The full key is never sent to the browser.
 
 ### 4.2 `POST /api/env/key?key=<KEY_NAME>`
 
-Writes a single key to `.env`.
+Writes a single key to `.env`. **Allowed `KEY_NAME` values**: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`. Any other value returns 400.
 
-**Allowed `KEY_NAME` values**: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`. Any other value returns 400.
-
-**Request body**
-
-```json
-{ "value": "<full key value>" }
-```
-
-Empty `value` deletes the key from `.env`.
-
-**Response (200)**
-
-```json
-{ "success": true, "masked": "****abcd" }
-```
-
-**Response (400)** — unknown key, invalid JSON, or non-string value.
-
-**Known bug** (tracked in `../docs/REVIEWS.md` R3): the writer currently reconstructs `.env` from the four-key whitelist only, dropping any other keys the user has added. The original "preserve siblings" intent is not implemented.
+**Known bug** (tracked in `../docs/REVIEWS.md` R3): the writer reconstructs `.env` from the four-key whitelist only, dropping any other keys the user has added — including `RTK_DB_PATH`, which Real RTK mode honours via `process.env`.
 
 ### 4.3 `POST /api/env`
 
-Bulk write endpoint. Accepts a JSON object with any of the four allowed key names; writes them all to `.env` after newline-strip sanitisation. Used by the legacy initial-form path; the per-key endpoint above is the preferred path for current UI.
+Bulk write endpoint. Accepts a JSON object with any of the four allowed key names; writes them all to `.env` after newline-strip sanitisation.
+
+### 4.4 `GET /api/rtk`
+
+Reads `~/Library/Application Support/rtk/history.db` (or `RTK_DB_PATH`) via `execFile('sqlite3', …)` and returns the full command history.
 
 **Response (200)**
 
 ```json
-{ "success": true }
+{
+  "commands": [
+    {
+      "id": 454,
+      "timestamp": "2026-05-29T09:56:20.265014+00:00",
+      "original_cmd": "curl -s https://…",
+      "rtk_cmd": "MiniMax-M3",
+      "input_tokens": 53,
+      "output_tokens": 53,
+      "saved_tokens": 0,
+      "savings_pct": 0,
+      "exec_time_ms": 0,
+      "project_path": ""
+    }
+  ]
+}
 ```
 
-**Response (400)** — invalid JSON.
+The `commands` array is sorted ascending by `id`. `error` is present in the response if the `sqlite3` invocation failed.
+
+### 4.5 `GET /api/rtk/summary`
+
+Returns the aggregate summary (matches `rtk gain` CLI output).
+
+**Response (200)**
+
+```json
+{
+  "total_commands": 523,
+  "total_input": 12345,
+  "total_output": 6789,
+  "total_saved": 0,
+  "total_exec_ms": 0
+}
+```
+
+### 4.6 `GET /api/rtk/stream` (SSE)
+
+Server-Sent Events stream. Sends a heartbeat `data: {"status":"connected"}\n\n` immediately, then `data: <command>\n\n` for each new RTK row. The server uses `fs.watch()` on the RTK DB directory; on a write event, it debounces 300ms and reads rows with `id > lastSeenDbId` (per-connection, in-memory). `req.on('close')` removes the client from `sseClients`.
+
+### 4.7 `GET /api/seed-quotas`
+
+Returns the cached `brand_quota` rows.
+
+**Response (200)**
+
+```json
+{
+  "success": true,
+  "quotas": [
+    {
+      "brand": "minimax",
+      "remaining": 78,
+      "limit_value": 100,
+      "reset_at": 1780567200000,
+      "reset_at_weekly": 1780876800000,
+      "weekly_remaining": 90,
+      "unit": "percent",
+      "raw_json": { /* full provider response */ },
+      "seeded_at": 1780548609886,
+      "error": null
+    }
+  ]
+}
+```
+
+### 4.8 `POST /api/seed-quotas`
+
+Force-refreshes the `brand_quota` cache. Body: `{"force": true}`. Calls each Brand's `BRAND_FETCHERS[brand].fetch(apiKey)` and replaces the cached row.
+
+**Response (200)**
+
+```json
+{ "success": true, "cached": false, "results": [...], "forced": true }
+```
 
 ## 5. Component hierarchy
 
@@ -186,22 +285,19 @@ Bulk write endpoint. Accepts a JSON object with any of the four allowed key name
 ```
 init()
 ├── applyTheme()
-├── buildSettingsFormFields()   # one fieldset per Brand
+├── buildSettingsFormFields()
 ├── setupEventListeners()
-│   ├── theme toggle
-│   ├── simulation pause/resume
-│   ├── clear logs (confirm)
-│   ├── export CSV
-│   ├── modal open/close
-│   ├── pricing form submit
-│   ├── custom request form submit
-│   └── table sort
 ├── setupTabs()
 ├── fetchAPIKeys()              # GET /api/env
+├── fetchBrandQuotas()          # GET /api/seed-quotas
 ├── startCountdownTimer()       # 30s loop
-├── calculateAndRenderDashboard()  # initial render with any persisted data
-├── scheduleNextSimulation()    # if auto-sim is on
-└── generateInitialMockHistory()  # if state.requests is empty
+├── if monitorMode === 'real':
+│     ├── fetchRealRTKData()    # initial snapshot
+│     └── connectRTKStream()    # EventSource('/api/rtk/stream')
+│   else (sim):
+│     ├── scheduleNextSimulation()
+│     └── generateInitialMockHistory()
+└── calculateAndRenderDashboard()
 ```
 
 The render path is:
@@ -209,7 +305,7 @@ The render path is:
 ```
 calculateAndRenderDashboard()
 ├── aggregate per Brand         # requests, tokens, cost, savings, cost5h, costWeekly
-├── renderBrandCards()
+├── renderBrandCards()          # uses state.brandQuotas for API-driven bar + reset
 └── renderTable()               # sortable
 ```
 
@@ -218,15 +314,36 @@ calculateAndRenderDashboard()
 ```
 http.createServer()
 ├── OPTIONS preflight  → 200
-├── GET  /api/env      → fs.readFile('.env'), mask
-├── POST /api/env/key  → parse, whitelist, sanitise, write (buggy: drops other keys)
-├── POST /api/env      → bulk write
-└── static fallback    → whitelist check, fs.readFile
+├── GET  /api/env
+├── POST /api/env/key
+├── POST /api/env
+├── GET  /api/rtk              # execFile('sqlite3', …, DB_PATH, query)
+├── GET  /api/rtk/summary       # execFile(... aggregate query)
+├── GET  /api/rtk/stream        # SSE; fs.watch() on dbDir
+├── GET  /api/seed-quotas       # SELECT FROM brand_quota
+├── POST /api/seed-quotas       # seedBrandQuotas(force)
+└── static fallback             # whitelist check, fs.readFile
+
+ensureBrandQuotaTable()         # CREATE + idempotent ALTER TABLE
+seedBrandQuotas(force)
+├── read existing rows
+├── if not force and all valid → return cached
+└── for each Brand in BRAND_FETCHERS:
+      ├── if no apiKey → store unit:'missing_key' row
+      ├── else: await config.fetch(apiKey)
+      └── INSERT OR REPLACE INTO brand_quota
+
+BRAND_FETCHERS = {
+  claude:   fetchClaudeQuota,    // probe + read anthropic-ratelimit-* headers
+  gemini:   fetchGeminiQuota,    // probe; not_exposed
+  glm:      fetchGLMQuota,        // probe + read x-ratelimit-* headers
+  minimax:  fetchMinimaxQuota,    // https.request to /v1/token_plan/remains
+}
 ```
 
 ## 6. Data flow
 
-### 6.1 Simulation (the only mode in v1)
+### 6.1 Simulation
 
 ```
 scheduleNextSimulation()  (8-20s random delay)
@@ -237,26 +354,106 @@ triggerRandomMockRequest()
    ▼
 addRequest(brand, input, output, saved)
    │
-   ├── compute cost (subset model — see ADR-0003 status), savings
-   ├── push to state.requests
+   ├── compute cost (disjoint model), savings
+   ├── push to state.requests  (source: 'sim')
    ├── truncate if > 500
    ├── persist to localStorage
    └── logEvent to console
 ```
 
-There is no other data source. The browser does not poll any backend endpoint on a timer; the 30s refresh is a local recompute.
+### 6.2 Real RTK Monitor
+
+```
+fetchRealRTKData() (initial)
+   │
+   ├── GET /api/rtk
+   ├── sort by id ASC
+   ├── for each cmd:
+   │     ├── brandKey = detectBrand(cmd.original_cmd)
+   │     ├── if !brandKey → skip
+   │     ├── compute cost (disjoint model), savings
+   │     ├── push to state.realCommands (source: 'real')
+   │     ├── if isInitialLoad and idx >= total-15: logEventSafe
+   │     └── if cmd.id > lastSeenCommandId: logEventSafe
+   └── lastSeenCommandId = max id seen
+
+connectRTKStream()
+   │
+   ├── EventSource('/api/rtk/stream')
+   ├── onmessage:
+   │     ├── parse cmd
+   │     ├── if cmd.status === 'connected' → return
+   │     ├── brandKey = detectBrand(cmd.original_cmd)
+   │     ├── compute cost, savings
+   │     ├── push to state.realCommands (idempotent on rtk_<id>)
+   │     ├── logEventSafe (Real-Time prefix)
+   │     └── if monitorMode === 'real' → calculateAndRenderDashboard()
+   └── onerror → warn and let EventSource auto-retry
+
+initWatcher() (server-side)
+   │
+   ├── sync lastSeenDbId on startup
+   ├── fs.watch(dbDir, …)
+   └── on 'history.db*' event → debounce 300ms → checkForNewCommands()
+```
+
+### 6.3 Provider-Quota Tracking
+
+```
+init() → fetchBrandQuotas()
+   │
+   ├── GET /api/seed-quotas
+   ├── state.brandQuotas = { brand: row }
+   └── calculateAndRenderDashboard()
+
+calculateAndRenderDashboard() (every 30s, or after brandQuotas change)
+   │
+   └── renderBrandCards():
+         for each brand:
+           apiQuota = state.brandQuotas[brandKey]
+           barPct5h = apiQuota ? computeApiUsedPct(apiQuota, '5h') ?? pct5h : pct5h
+           reset5hMs = apiQuota && apiQuota.reset_at > now ? apiQuota.reset_at - now : rolling5hMs
+           render <bar width=barPct5h% title=barSourceTooltip(...)>
+           render <badge reset time, tooltip apiTooltip or rollingTooltip>
+
+seedBrandQuotas(force) (server-side, every 30s via dashboard tick)
+   │
+   ├── read existing brand_quota rows
+   ├── if !force and all valid → return cached
+   └── for each Brand:
+         ├── if no apiKey → row{unit:'missing_key'}
+         ├── else: result = await BRAND_FETCHERS[brand].fetch(apiKey)
+         │     ├── Claude: probe with model:'claude-3-haiku-20240307', max_tokens:1
+         │     │           read anthropic-ratelimit-requests-remaining / -limit / -reset
+         │     ├── Gemini: probe with gemini-1.5-flash, not_exposed
+         │     ├── GLM: probe with glm-4, read x-ratelimit-remaining-requests / -limit-requests
+         │     └── MiniMax: GET /v1/token_plan/remains (Bearer)
+         │                 parse model_remains[0] (chat-model pick)
+         │                 end_time → reset_at; weekly_end_time → reset_at_weekly
+         │                 current_interval_remaining_percent → remaining
+         │                 current_weekly_remaining_percent → weekly_remaining
+         └── INSERT OR REPLACE INTO brand_quota
+```
 
 ## 7. Design patterns in use
 
-- **Safe DOM construction**: `appendConsoleLine(source, parts)` distinguishes `{html}` (trusted) from `{text}` (escaped). All untrusted input goes through `{text}`.
-- **Per-key env writer**: `POST /api/env/key` whitelists a key name. The "preserve siblings" intent is documented but not yet implemented (see `../docs/REVIEWS.md` R3).
+- **Safe DOM construction**: `appendConsoleLine(source, parts)` distinguishes `{html}` (trusted) from `{text}` (escaped). All untrusted input goes through `{text}`. RTK `original_cmd` is rendered through `{text}` segments in the Real-Time log path.
+- **Per-key env writer**: `POST /api/env/key` whitelists a key name. The "preserve siblings" intent is documented but not yet implemented (see R3).
 - **Pre-populated history**: `generateInitialMockHistory()` seeds 40 mock Requests on first load so the rolling-window bars have non-zero data to render immediately.
+- **API-driven bar with local fallback**: `computeApiUsedPct()` returns `null` when the API doesn't expose a quota; the renderer falls back to the local-spend percentage. The bar tooltip names the source so the user can tell which one is driving the fill.
+- **Idempotent `ALTER TABLE` migrations**: `ensureBrandQuotaTable()` runs `CREATE TABLE IF NOT EXISTS` followed by two `ALTER TABLE … ADD COLUMN` statements; each is wrapped in a no-op handler so re-running is safe.
+- **Defensive API parsing** (MiniMax fetcher): `fetchMinimaxQuota` tries three wrapper shapes (`model_remains` / `data.model_remains` / `remains`), prefers chat-model entries by name regex (`/M3|M2\.7|M2\.5|M2\b/`), separates the 5h vs weekly window by `(end_time - start_time)` delta, and falls back to the embedded `weekly_end_time` field when no separate weekly entry exists. Multiple field-name aliases are tried for `remaining` / `limit_value` / `weekly_remaining` to absorb API drift.
+- **SQLite query construction**: all SQL is built via `escapeSQLString` / `escapeSQLNumber` helpers; no string interpolation of user-supplied values. `child_process.execFile('sqlite3', …)` is used (not `exec`) so the command is array-form and not subject to shell parsing.
+- **SSE connection cleanup**: the server holds open SSE clients in `sseClients[]`; `req.on('close')` removes the client. New commands are broadcast by `forEach(client => client.write(...))`. No backpressure handling — clients are expected to be fast.
 
 ## 8. Known design gaps (from `../STATUS.md`)
 
-- **Cache model bug**: `billedInput = input - saved` (subset) coexists with a disjoint rate formula. Tracked in `../docs/adr/0003-cache-model-disjoint-input-and-saved.md` and `../docs/REVIEWS.md` R3.
+- **Cache model audit on pre-populated history**: the disjoint model is now applied across all four write paths, but `SIM_HISTORY_PRELOAD` rows pre-dating the migration may still look inconsistent (Reviewer R5 scope).
 - **Dead fields in `DEFAULT_BRAND_METADATA`**: `meta.limit` and `meta.windowLabel` are still in the schema. Tracked in `../docs/adr/0004-fixed-rolling-windows.md` and `../docs/REVIEWS.md` R3.
-- **Env-var loss**: per-key writer drops `.env` keys outside the four-key whitelist. Tracked in `../docs/REVIEWS.md` R3.
-- **Single-store history**: `localStorage` is the only client-side persistence. A server restart loses Request history.
+- **Env-var loss**: per-key writer drops `.env` keys outside the four-key whitelist. This now **also affects Real RTK mode** (`RTK_DB_PATH` is dropped). Tracked in `../docs/REVIEWS.md` R3.
+- **MiniMax fetcher reliance on undocumented field names**: `current_interval_remaining_percent`, `weekly_end_time`, etc. are inferred from the wire response, not a public spec. A future MiniMax API change could silently break the fetcher.
+- **`brand_quota` cache can serve 1-hour-stale data** if the provider is unreachable at the moment the reset window elapses. There is no out-of-band staleness signal.
+- **Single-store history**: `localStorage` is the only client-side persistence. A server restart loses Request history (only the brand_quota cache survives).
 - **No error boundary**: a single failed fetch silently degrades the dashboard; the user sees zeros and a system log message.
 - **No accessibility audit**: focus traps, keyboard nav, and screen reader labels are partially implemented; not verified end-to-end.
+- **No historical quota trend chart**: only the current snapshot is shown.

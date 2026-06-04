@@ -227,16 +227,16 @@ const server = http.createServer((req, res) => {
 
   // API Endpoint: Get brand quotas from DB
   if (req.method === 'GET' && req.url === '/api/seed-quotas') {
-    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error FROM brand_quota";
-    execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
+    // Route the read through seedBrandQuotas() so the cache-invalidation
+    // logic (reset_at expiry, 3-min maxAge for short-window providers like
+    // MiniMax) actually runs. Without this hop, the GET path would return
+    // stale rows indefinitely and the dashboard would never see fresh data.
+    seedBrandQuotas(false).then((out) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      let rows = [];
-      if (!error && stdout.trim()) {
-        try {
-          rows = JSON.parse(stdout);
-        } catch (e) {}
-      }
-      res.end(JSON.stringify({ success: true, quotas: rows }));
+      res.end(JSON.stringify({ success: true, cached: out.cached, quotas: out.results }));
+    }).catch((err) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
     });
     return;
   }

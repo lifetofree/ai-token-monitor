@@ -4,7 +4,7 @@ The dashboard was originally designed to read proxy-routed LLM traffic from RTK'
 
 ## Status
 
-**Superseded** — Real Mode was re-introduced after this ADR was written. The codebase currently supports both Simulation and Real RTK Monitor modes.
+**Superseded by [`0006-reintroduce-real-rtk-mode.md`](./0006-reintroduce-real-rtk-mode.md).** Real RTK Monitor Mode is the default Monitor Mode in v1; Simulation is preserved as the offline dev/demo mode. The consequences of this ADR (the things it removed) are now back. This file is preserved as historical context for the brief Simulation-only interlude.
 
 ## Considered Options
 

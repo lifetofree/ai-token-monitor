@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main, dev]
+
+jobs:
+  test:
+    name: Lint + Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Syntax check (server.js, app.js)
+        run: npm run check
+
+      - name: Run unit tests
+        run: npm test
+
+  smoke:
+    name: Boot Smoke Test
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Verify sqlite3 CLI is available
+        run: |
+          if command -v sqlite3 >/dev/null 2>&1; then
+            sqlite3 --version
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -yqq sqlite3
+            sqlite3 --version
+          fi
+
+      - name: Boot server and curl the static root
+        run: |
+          (node server.js &) ; SERVER_PID=$!
+          sleep 2
+          curl -fsS http://127.0.0.1:3000/ > /dev/null
+          curl -fsS http://127.0.0.1:3000/api/summary > /dev/null
+          curl -fsS http://127.0.0.1:3000/api/seed-quotas > /dev/null
+          kill $SERVER_PID

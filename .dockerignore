@@ -1,0 +1,41 @@
+# .dockerignore
+# Mirrors .gitignore so the image only carries the files needed at runtime.
+
+# Git
+.git
+.gitignore
+.github
+
+# Local artifacts
+node_modules
+npm-debug.log
+yarn-error.log
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.vscode
+.idea
+*.swp
+*.swo
+
+# Agent / mission scaffolding (not part of the shipped app)
+.ai.agents
+.claude
+docs
+*.md
+!README.md
+STATUS.md
+CONTEXT.md
+
+# Tests (no test runner runs inside the runtime image)
+tests
+vitest.config.js
+
+# Server-side SQLite store (will be bind-mounted, not baked in)
+*.db
+*.sqlite
+*.sqlite3
+data/

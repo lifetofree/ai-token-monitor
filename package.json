@@ -4,7 +4,13 @@
   "description": "Real-Time Multi-Brand AI Token Monitor Dashboard",
   "main": "index.html",
   "scripts": {
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "check": "node --check server.js && node --check app.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
   },
   "keywords": [
     "ai",

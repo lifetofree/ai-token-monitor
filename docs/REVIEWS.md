@@ -58,3 +58,87 @@ The removal of Real Mode (`../docs/adr/0005-remove-real-rtk-mode.md`) cleared se
 ## R4 — Verified by `STATUS.md` and `README.md`
 
 The `STATUS.md` and `README.md` "Known Gaps" sections should now be cross-checked against R3. The prior `README.md` listed "Real-Mode Regression" as a known gap; this is now reframed as the intentional removal documented in `../docs/adr/0005-remove-real-rtk-mode.md`. The "Favicon 404" and "Missing Docs Folder" items are closed. The "Environment Variable Loss" item is still open and now lives in R3. The "No Automated Unit Tests" item is still open.
+
+## R5 — Real RTK re-introduction, brand-quota tracking, API-driven bar, UI polish
+
+This pass covers the four features that landed since R4: Real RTK Monitor Mode re-introduction, `brand_quota` table + provider-quota tracking, API-driven progress bar with source tooltip, and the recent UI polish (theme-aware form controls, compact API Tokens tab, LLM-only Live Request Log Feed filter).
+
+### R5-C1 — `fetchMinimaxQuota` correctness
+- **What was checked**: the fetcher correctly maps the actual MiniMax `model_remains` payload to `BrandQuota`. Specifically, it should extract `current_interval_remaining_percent` (5h), `current_weekly_remaining_percent` (weekly), `end_time` (5h reset), and `weekly_end_time` (weekly reset) from the "general" (chat-model) entry.
+- **What was found**: ✅ the fetcher correctly identifies the chat-model entry by name regex, tries the three wrapper shapes (`model_remains` / `data.model_remains` / `remains`), and falls back to embedded `weekly_end_time` when no separate weekly entry exists. `unit` is set to `"percent"` and `limit_value` is synthesised to `100`.
+- **Action**: none.
+
+### R5-C2 — Reset-time authority when API value is stale
+- **What was checked**: when `brandQuotas[brandKey].reset_at` is in the past, the dashboard should not display a negative countdown.
+- **What was found**: ✅ `app.js` guards with `apiQuota.reset_at > now` before computing the delta; past timestamps are silently treated as "no API value" and the badge falls back to the local rolling estimate.
+- **Action**: none. (The cache invalidation in `seedBrandQuotas` is responsible for refreshing past timestamps before they are observed; see R5-X1 for the cache-staleness edge case.)
+
+### R5-S1 — `appendConsoleLine` segments in the Real-Time log path
+- **What was checked**: the SSE stream's `onmessage` handler in `connectRTKStream` should render `cmd.original_cmd` through `{text}` segments, not `{html}`, to prevent XSS via upstream log injection.
+- **What was found**: ✅ the handler uses `{ text: cmd.original_cmd }` (a `{text}` segment). `logEventSafe` escapes it via the `escapeHtml`-style path. The same is true for the initial-load `fetchRealRTKData` path.
+- **Action**: none.
+
+### R5-S2 — `appendConsoleLine` segments in the initial-load path
+- **What was checked**: same as R5-S1 but for `fetchRealRTKData` (the initial full-snapshot path).
+- **What was found**: ✅ identical pattern.
+- **Action**: none.
+
+### R5-S3 — Idempotent `ALTER TABLE` migrations
+- **What was checked**: `ensureBrandQuotaTable()` should run cleanly on a DB that already has `reset_at_weekly` and `weekly_remaining` (re-running the migration should not error).
+- **What was found**: ✅ both `ALTER TABLE … ADD COLUMN` statements are wrapped in a no-op `() => {}` callback. SQLite returns an error when the column already exists; the callback swallows it.
+- **Action**: none.
+
+### R5-X1 — `brand_quota` cache staleness across a reset window
+- **What was checked**: if the provider is unreachable at the moment the reset window elapses, the cache may serve a past `reset_at` until the next 1-hour staleness check.
+- **What was found**: ⚠️ the cache invalidation in `seedBrandQuotas` is correct (it invalidates on `Date.now() >= r.reset_at`), but if the force-refresh fails (network error, etc.), the dashboard falls back to the local rolling estimate — which is correct UX, but the user has no way to know the API value is "stale" vs "missing." Tracked in `../docs/SYSTEM_DESIGN.md` §8.
+- **Action**: future enhancement — surface a non-blocking "quota data may be stale" warning when a force-refresh fails. Out of scope for R5.
+
+### R5-X2 — MiniMax fetcher reliance on undocumented field names
+- **What was checked**: `fetchMinimaxQuota` reads `current_interval_remaining_percent`, `weekly_end_time`, etc. — field names inferred from the wire response, not from a public spec.
+- **What was found**: ⚠️ documented in `../docs/SYSTEM_DESIGN.md` §8 as a known design gap. A future MiniMax API change could silently break the fetcher.
+- **Action**: defensive parsing already tries multiple field-name aliases (`extractRemaining` falls back through `current_interval_remaining_count`, `current_window_remaining_count`, `remaining_count`, `usage_percent`, `usagePercent`). Adequate for v1.
+
+### R5-D1 — `Request.source` regression
+- **What was checked**: after the Real RTK re-introduction, every `Request` should have a meaningful `source` (`'real'` or `'sim'`), and the renderer should select the active array via `getActiveRequests()`.
+- **What was found**: ✅ all four write paths set `source` explicitly. The mode switcher in the header flips `state.monitorMode`; the dashboard re-renders correctly.
+- **Action**: none.
+
+### R5-D2 — `generateInitialMockHistory` disjoint-model audit
+- **What was checked**: pre-populated `SIM_HISTORY_PRELOAD` rows should be consistent with the disjoint model (i.e., `inputTokens` is the billed amount, `savedTokens` is disjoint).
+- **What was found**: ⚠️ the current `generateInitialMockHistory` emits disjoint fields (the cost formula was updated as part of the ADR-0003 application), but rows generated **before** the migration are still in `localStorage` for any user who hasn't cleared their state. The cost figures will look inconsistent.
+- **Action**: the "Reset Data" button in the header clears `localStorage` and regenerates the pre-populated history. Until the user clicks it, the historic figures from the old simulator are still rendered. Documented as a known gap; not blocking.
+
+### R5-U1 — Mode switcher visible in the header
+- **What was checked**: the header mode switcher should expose both "Real RTK Monitor" and "Simulation".
+- **What was found**: ✅ `<select id="monitor-mode-select">` in `index.html` with both options. State persists in `atm_monitor_mode`.
+- **Action**: none.
+
+### R5-U2 — Live Request Log Feed filters LLM commands only
+- **What was checked**: the last-15 window on initial load should contain only commands that pass `detectBrand()`; shell noise (curl/grep/ls) should not push real API calls out of the feed.
+- **What was found**: ✅ `fetchRealRTKData` pre-counts LLM commands (`llmCount`), then uses `llmCount - 15` as the threshold. The `recentLogThreshold` is LLM-aware.
+- **Action**: none.
+
+### R5-U3 — Theme-aware form controls
+- **What was checked**: all `<input>` and `<select>` elements should respect light/dark theme via CSS variables. Dropdowns should have a visible chevron in both themes.
+- **What was found**: ✅ `#tab-content-tokens .form-group-row input` binds to `var(--bg-main)`, `var(--text-main)`, `var(--border)`, `var(--primary)`. The global `select` rule uses two inline SVG chevron data-URIs (one for light, one for dark via `[data-theme="dark"]`). Focus states have a 3px ring via `color-mix(in srgb, var(--primary) 20%, transparent)`.
+- **Action**: none.
+
+### R5-U4 — Compact API Tokens tab
+- **What was checked**: the API Tokens tab should be scannable — fixed-width monospace labels, 12px font.
+- **What was found**: ✅ `#tab-content-tokens .form-group-row label` has `flex: 0 0 170px`, `font-size: 12px`, monospace font, `letter-spacing: 0.02em`.
+- **Action**: none.
+
+### R5-ADR — Documentation drift
+- **What was checked**: ADRs and the docs that cite them are consistent.
+- **What was found**: ⚠️ the R5 pass found and fixed: `BUSINESS_GOALS.md`, `STATUS.md`, `README.md`, `CONTEXT.md`, `REQUIREMENTS.md`, `USER_JOURNEY.md`, `TECH_STACK.md`, `SYSTEM_DESIGN.md` were all refreshed. `0005` and `0003` status lines updated. `0006` written.
+- **Action**: closed.
+
+### R5 summary
+
+| Severity | Count | Items |
+|---|---|---|
+| ✅ Pass | 8 | R5-C1, R5-C2, R5-S1, R5-S2, R5-S3, R5-D1, R5-U1, R5-U2, R5-U3, R5-U4, R5-ADR |
+| ⚠️ Documented gap | 3 | R5-X1 (cache staleness UX), R5-X2 (MiniMax field-name fragility), R5-D2 (pre-populated history disjoint audit) |
+| ❌ Regression | 0 | — |
+
+R3 is now **partially closed** (cache model is applied; the `meta.limit` / `windowLabel` cleanups are still open; env-var-loss is open and now also affects `RTK_DB_PATH`).

@@ -83,6 +83,21 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 
 - The dashboard recomputes aggregates from the in-memory store every 30s. A circular countdown shows the time-to-next-refresh.
 
+### 2.8 Provider-Quota Tracking
+
+- The dashboard fetches **live quota data** from each provider's API and caches it in the server-side `brand_quota` SQLite table. This is **distinct** from local spend — it is the vendor's authoritative view of how much quota is left.
+- **Per-Brand `unit` semantics**:
+  - `claude` and `glm` return `unit: "requests"` (count-based) with `limit_value` from response headers.
+  - `minimax` returns `unit: "percent"` (0–100) from the `token_plan/remains` body. The fetcher synthesises `limit_value: 100` and reads `current_interval_remaining_percent` / `current_weekly_remaining_percent`.
+  - `gemini` returns `unit: "not_exposed"` — no quota API, bar falls back to local spend.
+- **Cache lifecycle** (in `server.js` → `seedBrandQuotas()`):
+  - Lazy seed on dashboard load; force-refresh via `POST /api/seed-quotas {"force": true}`.
+  - **Cache invalidation** triggers when either the 5h `reset_at` or the weekly `reset_at_weekly` has elapsed, OR the cache is older than 1 hour (when a reset window is exposed) / 1 minute (when it is not).
+  - The cached row includes `raw_json` (full provider response) for debugging and `error` (string) when the fetch failed.
+- **API-driven progress bar rule**: when `state.brandQuotas[brandKey].remaining` is present, the brand card's 5-hour and weekly bar **fill and color reflect the provider's used %**, not local spend. The bar's `title` tooltip distinguishes the source: `"Bar driven by provider API quota (used %)"` vs `"Bar driven by local rolling-window spend in this dashboard."`
+- **Reset-time authority rule**: when `state.brandQuotas[brandKey].reset_at` (or `reset_at_weekly`) is in the future, the "Resets at HH:MM" badge uses the provider's timestamp and a different tooltip (`"Reset time from the provider API (authoritative window boundary)"`). The local rolling-log estimate is the fallback.
+- **Failures are silent-degrade, not error-bubble**: a failed fetch stores `unit: "error"` and an `error` string; the bar falls back to local spend without a user-facing error toast (consistent with the existing "no error boundary" stance in §4). A future enhancement may surface a non-blocking warning.
+
 ## 3. Acceptance criteria
 
 | ID | Criterion | Verification |
@@ -94,20 +109,25 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 | AC-5 | Invalid pricing input is rejected without mutating Brand Metadata | Manual: enter `"abc"` in a rate field |
 | AC-6 | `GET /api/env` returns masked keys; full keys never reach the browser | Code review + DevTools network tab |
 | AC-7 | CSV export opens in a spreadsheet with seven columns and one row per Brand | Manual: open in Numbers / Excel |
-| AC-8 | "Resets at HH:MM" tooltip text matches the sliding-window semantics | Manual: hover the badge |
+| AC-8 | "Resets at HH:MM" tooltip text matches the sliding-window semantics when no API quota is present | Manual: hover the badge with a Brand that has no API key configured |
 | AC-9 | Escape closes any open modal | Manual: open modal, press Escape |
 | AC-10 | The Brand `antigravity` does not appear in the Brand picker or Brand cards | Manual: open "Send Custom Request" |
 | AC-11 | Favicon loads without 404 | Manual: load `/favicon.svg` and inspect the network tab |
-| AC-12 | The mode switcher dropdown is not in the header | Manual: inspect the page |
+| AC-12 | The header mode switcher exposes both "Real RTK Monitor" and "Simulation"; the selection persists in `localStorage` under `atm_monitor_mode` | Manual: switch modes, reload the page |
+| AC-13 | With a MiniMax API key present, the brand card's 5-hour bar fill width equals `100 - brandQuotas.minimax.remaining` (±1%) and the bar tooltip reads "Bar driven by provider API quota (used %)" | Manual: hover the bar, compare to the MiniMax web console |
+| AC-14 | When `brandQuotas[brandKey].reset_at` is in the future, the "Resets at HH:MM" badge shows the provider's timestamp (matching the MiniMax web console within ±1 minute), and the badge tooltip reads "Reset time from the provider API (authoritative window boundary)" | Manual: compare the badge time to the MiniMax web console |
+| AC-15 | `POST /api/seed-quotas {"force": true}` updates `brand_quota` rows within 3 seconds, and the dashboard re-renders the new values within one 30-second refresh tick | Manual: change a Provider cap externally, force-refresh, observe |
+| AC-16 | On initial load, the Live Request Log Feed contains only commands that pass `detectBrand()` (shell commands such as `curl`, `grep`, `ls` are filtered out of the last-15 window) | Manual: insert one LLM and one shell command via `sqlite3` directly, reload, confirm the feed shows only the LLM command |
 
 ## 4. Known gaps
 
-- No automated tests for the pure functions (cost, savings, cache rate, CSV builder).
+- No automated tests for the pure functions (cost, savings, cache rate, CSV builder, `computeApiUsedPct`, MiniMax response parsing).
 - No CI pipeline.
 - `localStorage` only — no cross-restart persistence for Request history.
-- Cache model is internally inconsistent in code (`billedInput = input - saved` coexists with a disjoint rate formula) — see `../docs/adr/0003-cache-model-disjoint-input-and-saved.md` status.
+- Cache model: the **disjoint model is applied** in `addRequest`, `fetchRealRTKData`, `connectRTKStream`, and `generateInitialMockHistory` per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; the `SIM_HISTORY_PRELOAD` rows pre-dating the migration may still look inconsistent (Reviewer R5 scope).
 - `windowLabel` and `meta.limit` still in `DEFAULT_BRAND_METADATA` — see `../docs/adr/0004-fixed-rolling-windows.md` status and `../docs/REVIEWS.md` R3.
-- Env-var loss bug: per-key writer drops `.env` keys outside the four-key whitelist — see `../docs/REVIEWS.md` R3.
+- Env-var loss bug: per-key writer drops `.env` keys outside the four-key whitelist (now also affects `RTK_DB_PATH`, which Real RTK mode honours) — see `../docs/REVIEWS.md` R3.
+- No historical quota trend chart (only the current snapshot is shown).
 - i18n not in scope (limit labels are English-only).
 - No accessibility audit (keyboard nav, screen reader labels).
-- No error boundary in the UI — a single failed fetch silently degrades the dashboard.
+- No error boundary in the UI — a single failed provider-quota fetch silently degrades the dashboard to local-spend view.
