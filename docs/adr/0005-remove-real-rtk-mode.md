@@ -4,7 +4,7 @@ The dashboard was originally designed to read proxy-routed LLM traffic from RTK'
 
 ## Status
 
-Accepted, **applied** in the current code. Server commit that removed `/api/rtk`, `RTK_DB_PATH`, and `execFile`; client commit that removed the mode switcher dropdown, `state.monitorMode`, `state.realCommands`, `fetchRealRTKData`, and `lastSeenCommandId`.
+**Superseded** — Real Mode was re-introduced after this ADR was written. The codebase currently supports both Simulation and Real RTK Monitor modes.
 
 ## Considered Options
 

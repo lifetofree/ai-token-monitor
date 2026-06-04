@@ -21,7 +21,6 @@ function getBrandColor(key) {
 const FALLBACK_BRAND_COLOR = '#94a3b8';
 
 const DEFAULT_BRAND_METADATA = {
-  rtk: { name: 'RTK Proxy', inputCost: 0, outputCost: 0, color: 'var(--color-rtk)', limit: 0, limit5h: 0, limitWeekly: 0, windowLabel: '5-Hour' },
   gemini: { name: 'Gemini', inputCost: 1.25, outputCost: 5.00, color: 'var(--color-gemini)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
   claude: { name: 'Claude', inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)', limit: 100.00, limit5h: 5.00, limitWeekly: 30.00, windowLabel: '5-Hour' },
   minimax: { name: 'Minimax', inputCost: 1.00, outputCost: 4.00, color: 'var(--color-minimax)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
@@ -36,7 +35,7 @@ let state = {
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
   monitorMode: localStorage.getItem('atm_monitor_mode') || 'real',
-  currentSort: { key: 'cost', direction: 'desc' }
+  currentSort: { key: 'brand', direction: 'asc' }
 };
 
 // Migration: Ensure new brands and fields exist in loaded state (older localStorage payloads)
@@ -51,6 +50,13 @@ Object.keys(DEFAULT_BRAND_METADATA).forEach(bKey => {
         state.brandMetadata[bKey][field] = def[field];
       }
     });
+  }
+});
+
+// Clean up any keys that are no longer in DEFAULT_BRAND_METADATA (e.g., deprecated rtk brand)
+Object.keys(state.brandMetadata).forEach(bKey => {
+  if (!DEFAULT_BRAND_METADATA[bKey]) {
+    delete state.brandMetadata[bKey];
   }
 });
 
@@ -155,6 +161,7 @@ function init() {
   
   // Fetch API Keys/tokens from .env
   fetchAPIKeys();
+  fetchBrandQuotas();
   
   // Start countdown loops
   startCountdownTimer();
@@ -281,8 +288,8 @@ function renderBrandCards(brandData) {
     const meta = state.brandMetadata[bKey];
     const totalTokens = data.inputTokens + data.outputTokens;
 
-    const limit5h = meta.limit5h || 2.00;
-    const limitWeekly = meta.limitWeekly || 15.00;
+    const limit5h = meta.limit5h > 0 ? meta.limit5h : 2.00;
+    const limitWeekly = meta.limitWeekly > 0 ? meta.limitWeekly : 15.00;
     const windowLabel = meta.windowLabel || '5-Hour';
 
     const pct5h = Math.min(100, (data.cost5h / limit5h) * 100);
@@ -363,8 +370,9 @@ function renderTable(brandData) {
   items.sort((a, b) => {
     let valA, valB;
     if (sortKey === 'brand') {
-      valA = a.name.toLowerCase();
-      valB = b.name.toLowerCase();
+      const brandKeys = Object.keys(state.brandMetadata);
+      valA = brandKeys.indexOf(a.key);
+      valB = brandKeys.indexOf(b.key);
     } else if (sortKey === 'requests') {
       valA = a.requests;
       valB = b.requests;
@@ -428,7 +436,8 @@ function startCountdownTimer() {
         calculateAndRenderDashboard();
         logEvent('SYSTEM', 'Completed scheduled dashboard metrics recalculation.');
       }
-      
+      fetchBrandQuotas();
+
       // Spark visual indicator or countdown reset
       refreshTimer = REFRESH_INTERVAL_SECONDS;
     }
@@ -481,11 +490,8 @@ function addRequest(brandKey, inputTokens, outputTokens, savedTokens) {
   const metadata = state.brandMetadata[brandKey];
   if (!metadata) return;
 
-  // Calculate cost
-  const billedInput = Math.max(0, inputTokens - savedTokens);
-
-  // Rate is per 1M tokens
-  const cost = ((billedInput * metadata.inputCost) + (outputTokens * metadata.outputCost)) / 1000000;
+  // Calculate cost (ADR-0003: disjoint model, inputTokens is the billed amount)
+  const cost = ((inputTokens * metadata.inputCost) + (outputTokens * metadata.outputCost)) / 1000000;
   const savings = ((savedTokens * metadata.inputCost)) / 1000000;
 
   const newReq = {
@@ -511,7 +517,8 @@ function addRequest(brandKey, inputTokens, outputTokens, savedTokens) {
   calculateAndRenderDashboard();
 
   // Real-time console log updates immediately!
-  const savedPercent = inputTokens > 0 ? ((savedTokens / inputTokens) * 100).toFixed(0) : '0';
+  const totalAttemptedInput = inputTokens + savedTokens;
+  const savedPercent = totalAttemptedInput > 0 ? ((savedTokens / totalAttemptedInput) * 100).toFixed(0) : '0';
 
   logEvent(
     metadata.name,
@@ -523,9 +530,10 @@ function generateInitialMockHistory() {
   logEvent('SYSTEM', 'Generating pre-populated analytics history...');
 
   const brands = Object.keys(state.brandMetadata);
+  const llmBrands = brands.filter(b => b !== 'rtk');
   // Generate SIM_HISTORY_PRELOAD logs spread over the last 2 days
   for (let i = 0; i < SIM_HISTORY_PRELOAD; i++) {
-    const brandKey = brands[Math.floor(Math.random() * brands.length)];
+    const brandKey = llmBrands[Math.floor(Math.random() * llmBrands.length)];
     const metadata = state.brandMetadata[brandKey];
 
     const inputTokens = Math.floor(Math.random() * 8000) + 400;
@@ -533,8 +541,8 @@ function generateInitialMockHistory() {
     const hitProbability = Math.floor(Math.random() * 35);
     const savedTokens = Math.floor(inputTokens * (hitProbability / 100));
 
-    const billedInput = Math.max(0, inputTokens - savedTokens);
-    const cost = ((billedInput * metadata.inputCost) + (outputTokens * metadata.outputCost)) / 1000000;
+    // Calculate cost (ADR-0003: disjoint model, inputTokens is the billed amount)
+    const cost = ((inputTokens * metadata.inputCost) + (outputTokens * metadata.outputCost)) / 1000000;
     const savings = ((savedTokens * metadata.inputCost)) / 1000000;
 
     state.requests.push({
@@ -767,7 +775,7 @@ function setupEventListeners() {
         state.currentSort.direction = state.currentSort.direction === 'asc' ? 'desc' : 'asc';
       } else {
         state.currentSort.key = key;
-        state.currentSort.direction = 'desc'; // Default to desc for metrics
+        state.currentSort.direction = key === 'brand' ? 'asc' : 'desc'; // Default to asc for brand, desc for metrics
       }
       
       calculateAndRenderDashboard();
@@ -786,6 +794,7 @@ function setupEventListeners() {
       if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
       fetchRealRTKData(true);
       connectRTKStream();
+      fetchBrandQuotas();
     } else {
       if (rtkEventSource) {
         rtkEventSource.close();
@@ -805,7 +814,7 @@ function updateSimButtonUI(isActive) {
     if (elements.simStatusText) elements.simStatusText.textContent = 'Pause Simulation';
     if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
     if (elements.consoleStatusIndicator) elements.consoleStatusIndicator.className = 'status-indicator';
-    if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Auto-simulation active (10-30s)';
+    if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Auto-simulation active (8-20s)';
   } else {
     if (elements.simStatusIcon) elements.simStatusIcon.textContent = '▶';
     if (elements.simStatusText) elements.simStatusText.textContent = 'Resume Simulation';
@@ -883,7 +892,7 @@ function exportToCSV() {
   // Compile row values
   Object.keys(state.brandMetadata).forEach(bKey => {
     const name = state.brandMetadata[bKey].name;
-    const reqs = state.requests.filter(r => r.brand === bKey);
+    const reqs = getActiveRequests().filter(r => r.brand === bKey);
 
     let input = 0, output = 0, saved = 0, cost = 0, savings = 0;
     reqs.forEach(r => {
@@ -987,6 +996,56 @@ function fetchAPIKeys() {
     .catch(err => console.error('Failed to load local API keys from backend:', err));
 }
 
+function fetchBrandQuotas() {
+  fetch('/api/seed-quotas')
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      if (data.success && data.quotas) {
+        state.brandQuotas = {};
+        data.quotas.forEach(q => {
+          state.brandQuotas[q.brand] = q;
+        });
+        calculateAndRenderDashboard();
+      }
+    })
+    .catch(err => {
+      console.warn('Failed to fetch brand quotas:', err);
+    });
+}
+
+function triggerSilentQuotaSync(brandKey) {
+  if (!state.syncingBrands) state.syncingBrands = {};
+  if (state.syncingBrands[brandKey]) return;
+  state.syncingBrands[brandKey] = true;
+
+  fetch('/api/seed-quotas', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force: true })
+  })
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      state.syncingBrands[brandKey] = false;
+      if (data.success && data.results) {
+        if (!state.brandQuotas) state.brandQuotas = {};
+        data.results.forEach(q => {
+          state.brandQuotas[q.brand] = q;
+        });
+        calculateAndRenderDashboard();
+      }
+    })
+    .catch(err => {
+      state.syncingBrands[brandKey] = false;
+      console.warn(`Silent quota sync failed for ${brandKey}:`, err);
+    });
+}
+
 // Returns the active dataset for the current monitor mode.
 function getActiveRequests() {
   return state.monitorMode === 'real' ? state.realCommands : state.requests;
@@ -1025,10 +1084,11 @@ function fetchRealRTKData(forceRefresh = false) {
 
       sortedCmds.forEach((cmd, idx) => {
         const brandKey = detectBrand(cmd.original_cmd);
+        if (!brandKey) return; // Skip non-LLM proxy commands
         const meta = state.brandMetadata[brandKey];
 
-        const billedInput = Math.max(0, cmd.input_tokens - cmd.saved_tokens);
-        const cost = ((billedInput * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
+        // ADR-0003: disjoint model, input_tokens is the billed amount
+        const cost = ((cmd.input_tokens * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
         const savings = (cmd.saved_tokens * meta.inputCost) / 1000000;
 
         mappedRequests.push({
@@ -1047,7 +1107,8 @@ function fetchRealRTKData(forceRefresh = false) {
         // On subsequent refreshes, log only genuinely new commands.
         const shouldLog = isInitialLoad ? (idx >= recentLogThreshold) : (cmd.id > lastSeenCommandId);
         if (shouldLog) {
-          const savedPercent = cmd.input_tokens > 0 ? ((cmd.saved_tokens / cmd.input_tokens) * 100).toFixed(0) : '0';
+          const totalAttempted = cmd.input_tokens + cmd.saved_tokens;
+          const savedPercent = totalAttempted > 0 ? ((cmd.saved_tokens / totalAttempted) * 100).toFixed(0) : '0';
           logEventSafe(meta.name, [
             { text: '[Real] "' },
             { text: cmd.original_cmd },
@@ -1091,10 +1152,11 @@ function connectRTKStream() {
       if (cmd.status === 'connected') return;
 
       const brandKey = detectBrand(cmd.original_cmd);
+      if (!brandKey) return; // Skip non-LLM proxy commands
       const meta = state.brandMetadata[brandKey];
 
-      const billedInput = Math.max(0, cmd.input_tokens - cmd.saved_tokens);
-      const cost = ((billedInput * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
+      // ADR-0003: disjoint model, input_tokens is the billed amount
+      const cost = ((cmd.input_tokens * meta.inputCost) + (cmd.output_tokens * meta.outputCost)) / 1000000;
       const savings = (cmd.saved_tokens * meta.inputCost) / 1000000;
 
       const newReq = {
@@ -1116,7 +1178,8 @@ function connectRTKStream() {
           state.realCommands.shift();
         }
 
-        const savedPercent = cmd.input_tokens > 0 ? ((cmd.saved_tokens / cmd.input_tokens) * 100).toFixed(0) : '0';
+        const totalAttempted = cmd.input_tokens + cmd.saved_tokens;
+        const savedPercent = totalAttempted > 0 ? ((cmd.saved_tokens / totalAttempted) * 100).toFixed(0) : '0';
         logEventSafe(meta.name, [
           { text: '[Real-Time] "' },
           { text: cmd.original_cmd },
@@ -1148,8 +1211,8 @@ function detectBrand(cmd) {
   if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
   if (c.includes('minimax')) return 'minimax';
   if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-  // Untagged commands are RTK CLI proxy operations (git, grep, find, etc.)
-  return 'rtk';
+  // Untagged commands are RTK CLI proxy operations (git, grep, find, etc.) — exclude from dashboard
+  return null;
 }
 
 // Run application!

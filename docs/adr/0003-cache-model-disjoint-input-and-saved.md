@@ -4,7 +4,7 @@ The codebase had two competing cache models in the same render path. The cost fo
 
 ## Status
 
-Accepted, **not yet applied in code**. The `addRequest()` and `generateInitialMockHistory()` functions in `app.js` still compute `billedInput = Math.max(0, inputTokens - savedTokens)` and use it in the cost formula. The displayed Cache Hit Rate formula is unchanged from the original disjoint-style (`saved / (input + saved)`), so the bug from the grill-with-docs review (R2) is still live. The cost values are currently slightly under-reported; the rate formula correctly ranges 0-100%. A follow-up patch is required to bring the cost formula in line with the disjoint model.
+Accepted, **applied in code**. We have resolved the cache model inconsistency by adopting the disjoint model throughout the code path. All cost calculations (`addRequest`, `fetchRealRTKData`, `connectRTKStream`, `generateInitialMockHistory`) use disjoint parameters directly, where `inputTokens` is by definition the billed amount.
 
 ## Considered Options
 
