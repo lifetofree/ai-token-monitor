@@ -571,18 +571,19 @@ function fetchClaudeQuota(apiKey) {
           }
         }
 
-        // Anthropic exposes per-MINUTE request rate limits, not 5h/weekly window quotas.
-        // Store the count data for informational use but tag unit as 'per_minute' so
-        // computeApiUsedPct (which handles 'percent' and 'requests') ignores it and the
-        // 5h/weekly bars fall back to local rolling-spend. reset_at is the per-minute
-        // boundary — nulled out so it never replaces the 5h rolling-window reset label.
-        const remaining = parseInt(res.headers['anthropic-ratelimit-requests-remaining'], 10);
-        const limitVal = parseInt(res.headers['anthropic-ratelimit-requests-limit'], 10);
+        // Anthropic exposes per-MINUTE token rate limits via response headers.
+        // We read the token bucket (tokens-remaining/limit/reset) and tag the unit as
+        // 'per_minute' so the UI labels the bar "Per Minute" rather than "5-Hour".
+        // reset_at carries the per-minute window boundary so the reset badge is accurate.
+        const remaining = parseInt(res.headers['anthropic-ratelimit-tokens-remaining'], 10);
+        const limitVal = parseInt(res.headers['anthropic-ratelimit-tokens-limit'], 10);
+        const resetHeader = res.headers['anthropic-ratelimit-tokens-reset'];
+        const resetMs = resetHeader ? new Date(resetHeader).getTime() : null;
 
         resolve({
           remaining: isNaN(remaining) ? null : remaining,
           limit_value: isNaN(limitVal) ? null : limitVal,
-          reset_at: null,
+          reset_at: (resetMs && !isNaN(resetMs)) ? resetMs : null,
           unit: 'per_minute',
           raw_json: res.headers,
           error: errorMsg

@@ -187,6 +187,8 @@ function calculateAndRenderDashboard() {
       cost: 0,
       cost5h: 0,
       costWeekly: 0,
+      tokens5h: 0,
+      tokensWeekly: 0,
       savings: 0,
       earliest5hTimestamp: null,
       earliestWeeklyTimestamp: null
@@ -215,12 +217,14 @@ function calculateAndRenderDashboard() {
       const reqTime = req.timestamp;
       if (reqTime >= fiveHoursAgo) {
         brand.cost5h += req.cost;
+        brand.tokens5h += req.inputTokens + req.outputTokens;
         if (brand.earliest5hTimestamp === null || reqTime < brand.earliest5hTimestamp) {
           brand.earliest5hTimestamp = reqTime;
         }
       }
       if (reqTime >= oneWeekAgo) {
         brand.costWeekly += req.cost;
+        brand.tokensWeekly += req.inputTokens + req.outputTokens;
         if (brand.earliestWeeklyTimestamp === null || reqTime < brand.earliestWeeklyTimestamp) {
           brand.earliestWeeklyTimestamp = reqTime;
         }
@@ -288,10 +292,14 @@ function renderBrandCards(brandData) {
     const apiResetWeeklyMs = apiQuota && apiQuota.reset_at_weekly && apiQuota.reset_at_weekly > now
       ? apiQuota.reset_at_weekly - now : null;
 
-    // Drive the progress bar from the provider's API quota when available —
-    // this is the authoritative "used %" of the actual quota pool, as opposed
-    // to local rolling-spend which is only what flowed through this dashboard.
-    // Falls back to local spend when the API has nothing to report.
+    // Drive the progress bar from the provider's API quota when available.
+    // For 'per_minute' (Claude): show the token bucket data when it's present
+    // (remaining + limit_value are numbers), otherwise mark as unavailable.
+    const isPerMinute = apiQuota && apiQuota.unit === 'per_minute';
+    const perMinuteHasData = isPerMinute
+      && typeof apiQuota.remaining === 'number'
+      && typeof apiQuota.limit_value === 'number'
+      && apiQuota.limit_value > 0;
     const apiUsedPct5h = computeApiUsedPct(apiQuota, '5h');
     const apiUsedPctWeekly = computeApiUsedPct(apiQuota, 'weekly');
     const barPct5h = apiUsedPct5h !== null ? apiUsedPct5h : pct5h;
@@ -318,14 +326,20 @@ function renderBrandCards(brandData) {
     const reset5hLabel = reset5hMs !== null ? `Resets at ${new Date(now + reset5hMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(reset5hMs)})` : 'no active usage';
     const resetWeeklyLabel = resetWeeklyMs !== null ? `Resets at ${new Date(now + resetWeeklyMs).toLocaleDateString([], { month: 'short', day: 'numeric' })} ${new Date(now + resetWeeklyMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(resetWeeklyMs)})` : 'no active usage';
 
-    // Amount labels: show "X% remaining" when the provider reports percent-based quotas;
-    // fall back to dollar spend vs config limit for count/cost-based providers.
+    // Amount labels: provider-specific display.
+    // - percent unit (MiniMax, GLM): "X% remaining" from API
+    // - per_minute (Claude): RTK-tracked token count + cost for the window
+    // - otherwise: "$X.XX / $Y.YY" cost-based fallback
     const amounts5h = (apiQuota && apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number')
       ? `${apiQuota.remaining}% remaining`
-      : `${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}`;
+      : isPerMinute
+        ? `${formatCompactNumber(data.tokens5h)} tokens · ${formatCurrency(data.cost5h)}`
+        : `${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}`;
     const amountsWeekly = (apiQuota && typeof apiQuota.weekly_remaining === 'number')
       ? `${apiQuota.weekly_remaining}% remaining`
-      : `${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}`;
+      : isPerMinute
+        ? `${formatCompactNumber(data.tokensWeekly)} tokens · ${formatCurrency(data.costWeekly)}`
+        : `${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}`;
 
     const card = document.createElement('div');
     card.className = 'card brand-card';
@@ -343,7 +357,7 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">${escapeHtml(windowLabel)}</span>
             <span class="rolling-limit-amounts">${amounts5h}</span>
-            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;">${barPct5h.toFixed(0)}%</span>
+            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${barPct5h.toFixed(0)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSource5h))}">
             <div class="brand-limit-fill${style5h.class}" style="width: ${barPct5h}%;"></div>
@@ -356,7 +370,7 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">Weekly</span>
             <span class="rolling-limit-amounts">${amountsWeekly}</span>
-            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;">${barPctWeekly.toFixed(0)}%</span>
+            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${barPctWeekly.toFixed(0)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSourceWeekly))}">
             <div class="brand-limit-fill${styleWeekly.class}" style="width: ${barPctWeekly}%;"></div>
@@ -375,7 +389,7 @@ function computeApiUsedPct(apiQuota, scope) {
     if (apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number') {
       return Math.max(0, Math.min(100, 100 - apiQuota.remaining));
     }
-    if (apiQuota.unit === 'requests'
+    if ((apiQuota.unit === 'requests' || apiQuota.unit === 'per_minute')
         && typeof apiQuota.remaining === 'number'
         && typeof apiQuota.limit_value === 'number'
         && apiQuota.limit_value > 0) {
