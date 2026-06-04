@@ -869,7 +869,7 @@ function fetchMinimaxQuota(apiKey) {
           typeof primary.usage_percent === 'number' ||
           typeof primary.usagePercent === 'number'
         );
-        const hasCount = primary && extractLimit(primary) !== null;
+        const hasCount = primary && extractLimit(primary) > 0;
         const unit = !primary ? 'not_exposed' : (isPercent && !hasCount ? 'percent' : (hasCount ? 'requests' : 'not_exposed'));
         const limitValue = primary ? (extractLimit(primary) || (isPercent ? 100 : null)) : null;
 

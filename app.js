@@ -318,6 +318,15 @@ function renderBrandCards(brandData) {
     const reset5hLabel = reset5hMs !== null ? `Resets at ${new Date(now + reset5hMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(reset5hMs)})` : 'no active usage';
     const resetWeeklyLabel = resetWeeklyMs !== null ? `Resets at ${new Date(now + resetWeeklyMs).toLocaleDateString([], { month: 'short', day: 'numeric' })} ${new Date(now + resetWeeklyMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(resetWeeklyMs)})` : 'no active usage';
 
+    // Amount labels: show "X% remaining" when the provider reports percent-based quotas;
+    // fall back to dollar spend vs config limit for count/cost-based providers.
+    const amounts5h = (apiQuota && apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number')
+      ? `${apiQuota.remaining}% remaining`
+      : `${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}`;
+    const amountsWeekly = (apiQuota && typeof apiQuota.weekly_remaining === 'number')
+      ? `${apiQuota.weekly_remaining}% remaining`
+      : `${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}`;
+
     const card = document.createElement('div');
     card.className = 'card brand-card';
     card.style.setProperty('--brand-color', getBrandColor(bKey));
@@ -333,7 +342,7 @@ function renderBrandCards(brandData) {
         <div class="rolling-limit-row">
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">${escapeHtml(windowLabel)}</span>
-            <span class="rolling-limit-amounts">${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}</span>
+            <span class="rolling-limit-amounts">${amounts5h}</span>
             <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;">${barPct5h.toFixed(0)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSource5h))}">
@@ -346,7 +355,7 @@ function renderBrandCards(brandData) {
         <div class="rolling-limit-row">
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">Weekly</span>
-            <span class="rolling-limit-amounts">${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}</span>
+            <span class="rolling-limit-amounts">${amountsWeekly}</span>
             <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;">${barPctWeekly.toFixed(0)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSourceWeekly))}">
