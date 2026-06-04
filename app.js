@@ -307,9 +307,24 @@ function renderBrandCards(brandData) {
     // Reset countdown: oldest request in window drops out after window duration.
     // NOTE: with sustained traffic this is a sliding treadmill — the window never
     // fully "resets", the oldest single request expires and the next becomes oldest.
+    // When the provider exposes a real quota-reset timestamp via /api/seed-quotas
+    // (state.brandQuotas), prefer that — it's the authoritative window boundary.
+    const apiQuota = (state.brandQuotas && state.brandQuotas[bKey]) || null;
+    const apiReset5hMs = apiQuota && apiQuota.reset_at && apiQuota.reset_at > now
+      ? apiQuota.reset_at - now : null;
+    const apiResetWeeklyMs = apiQuota && apiQuota.reset_at_weekly && apiQuota.reset_at_weekly > now
+      ? apiQuota.reset_at_weekly - now : null;
+
+    const rolling5hMs = data.earliest5hTimestamp !== null ? (data.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS) - now : null;
+    const rollingWeeklyMs = data.earliestWeeklyTimestamp !== null ? (data.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS) - now : null;
+
+    const reset5hMs = apiReset5hMs !== null ? apiReset5hMs : rolling5hMs;
+    const resetWeeklyMs = apiResetWeeklyMs !== null ? apiResetWeeklyMs : rollingWeeklyMs;
+
     const rollingTooltip = 'Rolling window: the oldest request in this window falls out at the shown time. With sustained traffic the window slides continuously rather than fully resetting.';
-    const reset5hMs = data.earliest5hTimestamp !== null ? (data.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS) - now : null;
-    const resetWeeklyMs = data.earliestWeeklyTimestamp !== null ? (data.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS) - now : null;
+    const apiTooltip = 'Reset time from the provider API (authoritative window boundary).';
+    const reset5hTooltip = apiReset5hMs !== null ? apiTooltip : rollingTooltip;
+    const resetWeeklyTooltip = apiResetWeeklyMs !== null ? apiTooltip : rollingTooltip;
 
     const reset5hLabel = reset5hMs !== null ? `Resets at ${new Date(now + reset5hMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(reset5hMs)})` : 'no active usage';
     const resetWeeklyLabel = resetWeeklyMs !== null ? `Resets at ${new Date(now + resetWeeklyMs).toLocaleDateString([], { month: 'short', day: 'numeric' })} ${new Date(now + resetWeeklyMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(resetWeeklyMs)})` : 'no active usage';
@@ -335,7 +350,7 @@ function renderBrandCards(brandData) {
           <div class="brand-limit-bar">
             <div class="brand-limit-fill${style5h.class}" style="width: ${pct5h}%;"></div>
           </div>
-          <span class="reset-badge${style5h.class}" title="${escapeHtml(rollingTooltip)}">&#x23F1; ${reset5hLabel}</span>
+          <span class="reset-badge${style5h.class}" title="${escapeHtml(reset5hTooltip)}">&#x23F1; ${reset5hLabel}</span>
         </div>
 
         <!-- Weekly rolling limit -->
@@ -348,7 +363,7 @@ function renderBrandCards(brandData) {
           <div class="brand-limit-bar">
             <div class="brand-limit-fill${styleWeekly.class}" style="width: ${pctWeekly}%;"></div>
           </div>
-          <span class="reset-badge${styleWeekly.class}" title="${escapeHtml(rollingTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
+          <span class="reset-badge${styleWeekly.class}" title="${escapeHtml(resetWeeklyTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
         </div>
       </div>
     `;
@@ -1062,7 +1077,8 @@ function updateSimModeVisibility() {
 
 function fetchRealRTKData(forceRefresh = false) {
   if (forceRefresh) lastSeenCommandId = 0;
-  fetch('/api/rtk')
+  const url = lastSeenCommandId > 0 ? `/api/rtk?since=${lastSeenCommandId}` : '/api/rtk';
+  fetch(url)
     .then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
@@ -1126,7 +1142,11 @@ function fetchRealRTKData(forceRefresh = false) {
         lastSeenCommandId = sortedCmds[sortedCmds.length - 1].id;
       }
 
-      state.realCommands = mappedRequests;
+      if (forceRefresh) {
+        state.realCommands = mappedRequests;
+      } else {
+        state.realCommands = state.realCommands.concat(mappedRequests);
+      }
       if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
         state.realCommands = state.realCommands.slice(-MAX_REQUESTS_RETAINED);
       }
@@ -1207,12 +1227,11 @@ function connectRTKStream() {
 
 function detectBrand(cmd) {
   const c = cmd.toLowerCase();
-  if (c.includes('claude') || c.includes('anthropic')) return 'claude';
   if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
   if (c.includes('minimax')) return 'minimax';
   if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-  // Untagged commands are RTK CLI proxy operations (git, grep, find, etc.) — exclude from dashboard
-  return null;
+  // RTK primarily proxies Claude Code tool-use (bash, grep, ls, etc.) — default to claude
+  return 'claude';
 }
 
 // Run application!

@@ -44,9 +44,13 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // API Endpoint: Get RTK Database Commands (all records)
-  if (req.method === 'GET' && req.url === '/api/rtk') {
-    const query = "SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms FROM commands ORDER BY timestamp ASC";
+  // API Endpoint: Get RTK Database Commands
+  // Supports ?since=<id> for incremental fetches. Caps at 1000 rows to prevent OOM on large DBs.
+  if (req.method === 'GET' && req.url.startsWith('/api/rtk') && !req.url.startsWith('/api/rtk/')) {
+    const urlObj = new URL(req.url, `http://localhost:${PORT}`);
+    const sinceId = parseInt(urlObj.searchParams.get('since') || '0', 10) || 0;
+    const whereClause = sinceId > 0 ? `WHERE id > ${sinceId}` : '';
+    const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms FROM commands ${whereClause} ORDER BY id ASC LIMIT 1000`;
 
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -86,11 +90,19 @@ const server = http.createServer((req, res) => {
 
   // API Endpoint: Server-Sent Events stream for Real-Time updates
   if (req.method === 'GET' && req.url === '/api/rtk/stream') {
+    const allowedSseOrigin = (!origin || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1'))
+      ? (origin || `http://localhost:${PORT}`)
+      : null;
+    if (!allowedSseOrigin) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*'
+      'Access-Control-Allow-Origin': allowedSseOrigin
     });
     
     // Heartbeat handshake
@@ -215,7 +227,7 @@ const server = http.createServer((req, res) => {
 
   // API Endpoint: Get brand quotas from DB
   if (req.method === 'GET' && req.url === '/api/seed-quotas') {
-    const query = "SELECT brand, remaining, limit_value, reset_at, unit, raw_json, seeded_at, error FROM brand_quota";
+    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, unit, raw_json, seeded_at, error FROM brand_quota";
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       let rows = [];
@@ -386,6 +398,7 @@ function ensureBrandQuotaTable() {
     remaining INTEGER,
     limit_value INTEGER,
     reset_at INTEGER,
+    reset_at_weekly INTEGER,
     unit TEXT,
     raw_json TEXT,
     seeded_at INTEGER,
@@ -394,13 +407,16 @@ function ensureBrandQuotaTable() {
   execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
     if (error) {
       console.error('Failed to create brand_quota table:', error);
+      return;
     }
+    // Idempotent migration: older DBs lack reset_at_weekly.
+    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN reset_at_weekly INTEGER"], () => {});
   });
 }
 
 async function seedBrandQuotas(force) {
   const existing = await new Promise((resolve) => {
-    const query = "SELECT brand, remaining, limit_value, reset_at, unit, raw_json, seeded_at, error FROM brand_quota";
+    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, unit, raw_json, seeded_at, error FROM brand_quota";
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       if (error || !stdout.trim()) {
         resolve([]);
@@ -422,11 +438,16 @@ async function seedBrandQuotas(force) {
         allValid = false;
         break;
       }
+      // Invalidate cache when EITHER provider reset window has elapsed.
       if (r.reset_at && Date.now() >= r.reset_at) {
         allValid = false;
         break;
       }
-      const maxAge = r.reset_at ? (60 * 60 * 1000) : (60 * 1000);
+      if (r.reset_at_weekly && Date.now() >= r.reset_at_weekly) {
+        allValid = false;
+        break;
+      }
+      const maxAge = (r.reset_at || r.reset_at_weekly) ? (60 * 60 * 1000) : (60 * 1000);
       if (Date.now() - r.seeded_at >= maxAge) {
         allValid = false;
         break;
@@ -452,6 +473,7 @@ async function seedBrandQuotas(force) {
         remaining: null,
         limit_value: null,
         reset_at: null,
+        reset_at_weekly: null,
         unit: 'missing_key',
         raw_json: null,
         seeded_at: Date.now(),
@@ -465,6 +487,7 @@ async function seedBrandQuotas(force) {
           remaining: fetched.remaining,
           limit_value: fetched.limit_value,
           reset_at: fetched.reset_at,
+          reset_at_weekly: fetched.reset_at_weekly || null,
           unit: fetched.unit,
           raw_json: fetched.raw_json,
           seeded_at: Date.now(),
@@ -476,6 +499,7 @@ async function seedBrandQuotas(force) {
           remaining: null,
           limit_value: null,
           reset_at: null,
+          reset_at_weekly: null,
           unit: 'error',
           raw_json: null,
           seeded_at: Date.now(),
@@ -485,11 +509,12 @@ async function seedBrandQuotas(force) {
     }
 
     await new Promise((resolve) => {
-      const sql = `INSERT OR REPLACE INTO brand_quota (brand, remaining, limit_value, reset_at, unit, raw_json, seeded_at, error) VALUES (
+      const sql = `INSERT OR REPLACE INTO brand_quota (brand, remaining, limit_value, reset_at, reset_at_weekly, unit, raw_json, seeded_at, error) VALUES (
         ${escapeSQLString(row.brand)},
         ${escapeSQLNumber(row.remaining)},
         ${escapeSQLNumber(row.limit_value)},
         ${escapeSQLNumber(row.reset_at)},
+        ${escapeSQLNumber(row.reset_at_weekly)},
         ${escapeSQLString(row.unit)},
         ${escapeSQLString(row.raw_json ? JSON.stringify(row.raw_json) : null)},
         ${row.seeded_at},
@@ -694,15 +719,153 @@ function fetchGLMQuota(apiKey) {
 }
 
 function fetchMinimaxQuota(apiKey) {
-  // minimax quota fetcher not yet implemented
-  return Promise.resolve({
-    remaining: null,
-    limit_value: null,
-    reset_at: null,
-    unit: 'not_implemented',
-    raw_json: null,
-    error: 'minimax quota fetcher not yet implemented'
+  // MiniMax Token Plan remains endpoint (international). Returns 5-hour and
+  // weekly rolling-window quota for the user's coding plan subscription key.
+  // API key may be a standard MiniMax Open Platform key or a subscription key.
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'www.minimax.io',
+      path: '/v1/token_plan/remains',
+      method: 'GET',
+      headers: {
+        'authorization': `Bearer ${apiKey}`,
+        'accept': 'application/json'
+      }
+    }, (res) => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        let parsed = null;
+        try { parsed = body.trim() ? JSON.parse(body) : null; } catch (e) {}
+
+        if (res.statusCode >= 400) {
+          const errMsg = (parsed && parsed.base_resp && parsed.base_resp.status_msg)
+            ? parsed.base_resp.status_msg
+            : (parsed && parsed.message) ? parsed.message : `HTTP ${res.statusCode}`;
+          resolve({
+            remaining: null,
+            limit_value: null,
+            reset_at: null,
+            reset_at_weekly: null,
+            unit: 'error',
+            raw_json: parsed || body,
+            error: errMsg
+          });
+          return;
+        }
+
+        if (!parsed) {
+          resolve({
+            remaining: null,
+            limit_value: null,
+            reset_at: null,
+            reset_at_weekly: null,
+            unit: 'error',
+            raw_json: body,
+            error: 'empty response'
+          });
+          return;
+        }
+
+        // The API may wrap the array in different containers. Try common paths.
+        const candidates = []
+          .concat(Array.isArray(parsed) ? [{ model_remains: parsed }] : [])
+          .concat(parsed.model_remains || [])
+          .concat(parsed.data && parsed.data.model_remains || [])
+          .concat(parsed.remains || [])
+          .concat(parsed.data && parsed.data.remains || []);
+        // Normalize into [entry, ...] of windowed records.
+        const entries = [];
+        for (const c of candidates) {
+          if (Array.isArray(c)) entries.push(...c);
+          else if (c && typeof c === 'object') entries.push(c);
+        }
+
+        // Pick the chat-model entry first (M3 / M2.x), fall back to first entry.
+        const chatPick = entries.find(e => /M3|M2\.7|M2\.5|M2\b/i.test(String(e.model_name || e.model || '')));
+        const primary = chatPick || entries[0];
+
+        const fiveH_MS = 5 * 60 * 60 * 1000;
+        const sevenD_MS = 7 * 24 * 60 * 60 * 1000;
+
+        // Identify a separate weekly window if the response exposes one.
+        let weeklyEntry = null;
+        if (entries.length > 1) {
+          weeklyEntry = entries.find(e => e !== primary && isWeeklyEntry(e, fiveH_MS, sevenD_MS)) || null;
+        }
+        if (!weeklyEntry && primary && primary.end_time && primary.start_time) {
+          const startMs = toEpochMs(primary.start_time);
+          const endMs = toEpochMs(primary.end_time);
+          if (startMs && endMs && (endMs - startMs) > fiveH_MS * 2) {
+            // Primary window itself is longer than 5h — treat as weekly.
+            weeklyEntry = primary;
+          }
+        }
+
+        resolve({
+          remaining: primary ? extractRemaining(primary) : null,
+          limit_value: primary ? extractLimit(primary) : null,
+          reset_at: primary && !weeklyEntry ? extractEndTime(primary) : null,
+          reset_at_weekly: weeklyEntry ? extractEndTime(weeklyEntry) : null,
+          unit: primary ? 'requests' : 'not_exposed',
+          raw_json: parsed,
+          error: null
+        });
+      });
+    });
+
+    req.on('error', (e) => {
+      resolve({
+        remaining: null,
+        limit_value: null,
+        reset_at: null,
+        reset_at_weekly: null,
+        unit: 'error',
+        raw_json: null,
+        error: e.message
+      });
+    });
+
+    req.end();
   });
+}
+
+function toEpochMs(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return v > 1e12 ? v : v * 1000; // seconds vs ms heuristic
+  const parsed = Date.parse(v);
+  return isNaN(parsed) ? null : parsed;
+}
+
+function isWeeklyEntry(entry, fiveH_MS, sevenD_MS) {
+  const startMs = toEpochMs(entry.start_time);
+  const endMs = toEpochMs(entry.end_time);
+  if (!startMs || !endMs) return false;
+  const delta = endMs - startMs;
+  return delta >= sevenD_MS / 2 && delta <= sevenD_MS * 2;
+}
+
+function extractRemaining(entry) {
+  // Count-based fields win (per MiniMax docs); otherwise fall back to usage_percent
+  // which is REMAINING quota (not consumed), per the OpenClaw provider notes.
+  if (typeof entry.current_interval_remaining_count === 'number') return entry.current_interval_remaining_count;
+  if (typeof entry.current_window_remaining_count === 'number') return entry.current_window_remaining_count;
+  if (typeof entry.remaining_count === 'number') return entry.remaining_count;
+  if (typeof entry.usage_percent === 'number') return entry.usage_percent;
+  if (typeof entry.usagePercent === 'number') return entry.usagePercent;
+  return null;
+}
+
+function extractLimit(entry) {
+  if (typeof entry.current_window_quota_count === 'number') return entry.current_window_quota_count;
+  if (typeof entry.window_quota_count === 'number') return entry.window_quota_count;
+  if (typeof entry.quota_count === 'number') return entry.quota_count;
+  if (typeof entry.total_count === 'number') return entry.total_count;
+  return null;
+}
+
+function extractEndTime(entry) {
+  return toEpochMs(entry.end_time);
 }
 
 const BRAND_FETCHERS = {
