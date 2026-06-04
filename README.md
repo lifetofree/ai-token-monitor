@@ -31,7 +31,7 @@ RTK_DB_PATH=/path/to/custom/history.db node server.js
 ### Running the test suite
 ```bash
 npm install    # first time only
-npm test       # runs vitest run (8 files, 65 tests, ~270ms)
+npm test       # runs vitest run (10 files, 115 tests, ~300ms)
 npm run check  # node --check on server.js and app.js
 ```
 
@@ -62,8 +62,8 @@ In addition to local spend, the dashboard fetches **live quota data from each pr
 | Brand | Quota source | Unit | Reset windows |
 |---|---|---|---|
 | Claude | `anthropic-ratelimit-*` response headers | requests | 5h + weekly (header timestamps) |
-| Gemini | not exposed | — | bar falls back to local spend |
-| GLM | `x-ratelimit-*` response headers | requests | 5h + weekly (header timestamps) |
+| Gemini | not exposed by API | — | bar falls back to local spend |
+| GLM | `https://bigmodel.cn/api/monitor/usage/quota/limit` (Authorization header) | percent (used %) | 5h + ~2-day/weekly (`nextResetTime`) |
 | MiniMax | `https://www.minimax.io/v1/token_plan/remains` (Bearer auth) | percent | 5h + weekly (body fields) |
 
 The MiniMax fetcher is defensive: it tries multiple wrapper shapes (`model_remains` / `data.model_remains` / `remains`), prefers the chat-model entry by name regex, separates 5h vs weekly windows, and synthesises `limit_value: 100` for percent-based providers. See [`docs/SYSTEM_DESIGN.md` §3.1](./docs/SYSTEM_DESIGN.md) — "Defensive API parsing" design pattern.
@@ -94,6 +94,7 @@ All `original_cmd` text goes through `escapeHtml` before insertion into the DOM 
 - **Provider-Quota Tracking** — live 5h and weekly quota + reset times fetched from each provider's API, cached in `brand_quota`.
 - **API-Driven Progress Bars** — bars reflect the provider's used % (not just local spend) when a quota is present; tooltip distinguishes source.
 - **Authoritative Reset Times** — "Resets at HH:MM" badge prefers the provider's `reset_at` / `reset_at_weekly` over the local rolling estimate.
+- **Active Provider Selector** — dropdown in the header to tag all incoming RTK commands with the correct brand when switching between coding agents (Claude Code, Gemini CLI, etc.). Persisted in `localStorage`.
 - **Live Request Log Feed** — real-time SSE stream of new RTK commands; on initial load, surfaces the last 15 LLM-classified commands (shell noise filtered).
 - **Light / Dark Theme** — all form controls, dropdowns, and progress bars are theme-aware via CSS custom properties; custom SVG chevron in both modes; focus glow via `color-mix`.
 - **Compact API Tokens tab** — monospace labels at fixed 170px width, 12px font.
@@ -107,7 +108,7 @@ All `original_cmd` text goes through `escapeHtml` before insertion into the DOM 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/summary` | Brand rollups, totals, time-series |
-| `GET` | `/api/rtk` | Full snapshot of RTK commands |
+| `GET` | `/api/rtk` | Snapshot of RTK commands (supports `?since=<id>` for incremental) |
 | `GET` | `/api/rtk/summary` | Aggregated totals from RTK |
 | `GET` | `/api/rtk/stream` | SSE stream of new RTK commands |
 | `GET` | `/api/seed-quotas` | Brand quota cache (auto-refreshes on stale `reset_at`) |
@@ -131,7 +132,7 @@ See [`docs/SYSTEM_DESIGN.md`](./docs/SYSTEM_DESIGN.md) for full contracts and [`
 ├── favicon.svg
 ├── package.json             # dev / check / test / test:watch scripts
 ├── vitest.config.js         # Vitest config (node env)
-├── tests/                   # Vitest suite (8 files, 65 tests)
+├── tests/                   # Vitest suite (10 files, 115 tests)
 │   ├── format.test.js
 │   ├── cost.test.js
 │   ├── detectBrand.test.js
@@ -174,7 +175,7 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 | 📋 Product Manager (PM) | `docs/REQUIREMENTS.md`, `docs/USER_JOURNEY.md` | Complete — §2.8 Provider-Quota Tracking, AC-13..AC-16, dual-monitor journey |
 | ⚡ Technical Lead | `docs/TECH_STACK.md` | Complete — endpoint inventory, MiniMax HTTPS, server-side SQLite, outbound-network security baseline |
 | 🏗️ Architect | `docs/SYSTEM_DESIGN.md`, `docs/adr/0006-…` | Complete — 8 API contracts, dual-monitor data flow, defensive-parsing pattern |
-| 💻 TDD Coder | `tests/`, `vitest.config.js`, `package.json` | Complete — 8 test files, 65 tests; mirror-function approach documented per file |
+| 💻 TDD Coder | `tests/`, `vitest.config.js`, `package.json` | Complete — 10 test files, 115 tests; mirror-function approach documented per file |
 | 🕵️ Reviewer | `docs/REVIEWS.md` | Complete — R1, R2, R3, R4, R5 logged (8 ✅, 3 ⚠️, 0 ❌ in R5) |
 | 🚀 DevOps Engineer | `.github/workflows/ci.yml`, `Dockerfile`, `.dockerignore` | Complete — CI runs lint+test+boot smoke; container image is `node:20-slim` + system sqlite3 |
 
@@ -192,13 +193,17 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 
 ### Recently Closed
 
-- **Vitest suite** — 8 files, 65 tests, ~270 ms. Includes format, cost, `detectBrand`, `computeApiUsedPct`, MiniMax response parsing, CSV builder, `escapeHtml`, and the LLM-only log feed filter.
+- **Vitest suite** — 10 files, 115 tests, ~300 ms. Includes format, cost, `detectBrand`, `computeApiUsedPct`, MiniMax response parsing, CSV builder, `escapeHtml`, seed-quotas endpoint, env-server maskSecret, and the LLM-only log feed filter.
 - **CI + Docker** — GitHub Actions runs `npm install`, `npm run check`, `npm test`, and a sqlite3 boot probe; `Dockerfile` builds a minimal `node:20-slim` image with a `/api/summary` healthcheck.
 - **MiniMax cache staleness fix** — `GET /api/seed-quotas` now routes through `seedBrandQuotas(false)`, so cache invalidation (`reset_at` expiry, 3-min `maxAge`) actually runs on every poll.
 - **ADR-0006 re-introduction of Real RTK mode** — `0005` is now historical context.
 - **Authoritative reset times** — badge prefers the provider's `reset_at` / `reset_at_weekly` over the local rolling-log estimate.
 - **API-driven progress bar** — bar fill and colour reflect the provider's used %; tooltip distinguishes API vs local-spend source.
 - **Live Request Log Feed filter** — shell noise no longer pushes real API calls out of the last-15 window.
+- **GLM quota via monitoring API** — replaced the chat-completion probe with `bigmodel.cn/api/monitor/usage/quota/limit`, returning real 5h + weekly used % and reset timestamps.
+- **Active Provider selector** — dropdown to tag incoming RTK commands with the correct brand when switching coding agents; persisted in localStorage.
+- **RTK incremental fetch** — `GET /api/rtk?since=<id>` reduces payload by only fetching new rows instead of the full table.
+- **Timer countdown fix** — fixed visual jump when seconds transition from 2-digit to 1-digit.
 - **Theme-aware form controls** — all `<input>` / `<select>` / tab content use CSS variables; custom SVG chevron in both themes; focus glow.
 - **Compact API Tokens tab** — monospace labels, fixed 170px width, 12px font.
 - **Idempotent `ALTER TABLE` migrations** — `reset_at_weekly` and `weekly_remaining` columns land cleanly on a re-run.
