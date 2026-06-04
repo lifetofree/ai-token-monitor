@@ -301,9 +301,6 @@ function renderBrandCards(brandData) {
       return { class: '', color: 'var(--text-muted)' };
     };
 
-    const style5h = getLimitStyle(pct5h);
-    const styleWeekly = getLimitStyle(pctWeekly);
-
     // Reset countdown: oldest request in window drops out after window duration.
     // NOTE: with sustained traffic this is a sliding treadmill — the window never
     // fully "resets", the oldest single request expires and the next becomes oldest.
@@ -314,6 +311,22 @@ function renderBrandCards(brandData) {
       ? apiQuota.reset_at - now : null;
     const apiResetWeeklyMs = apiQuota && apiQuota.reset_at_weekly && apiQuota.reset_at_weekly > now
       ? apiQuota.reset_at_weekly - now : null;
+
+    // Drive the progress bar from the provider's API quota when available —
+    // this is the authoritative "used %" of the actual quota pool, as opposed
+    // to local rolling-spend which is only what flowed through this dashboard.
+    // Falls back to local spend when the API has nothing to report.
+    const apiUsedPct5h = computeApiUsedPct(apiQuota, '5h');
+    const apiUsedPctWeekly = computeApiUsedPct(apiQuota, 'weekly');
+    const barPct5h = apiUsedPct5h !== null ? apiUsedPct5h : pct5h;
+    const barPctWeekly = apiUsedPctWeekly !== null ? apiUsedPctWeekly : pctWeekly;
+    const style5h = getLimitStyle(barPct5h);
+    const styleWeekly = getLimitStyle(barPctWeekly);
+    const barSource5h = apiUsedPct5h !== null ? 'api' : 'local';
+    const barSourceWeekly = apiUsedPctWeekly !== null ? 'api' : 'local';
+    const barSourceTooltip = (src) => src === 'api'
+      ? 'Bar driven by provider API quota (used %).'
+      : 'Bar driven by local rolling-window spend in this dashboard.';
 
     const rolling5hMs = data.earliest5hTimestamp !== null ? (data.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS) - now : null;
     const rollingWeeklyMs = data.earliestWeeklyTimestamp !== null ? (data.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS) - now : null;
@@ -345,10 +358,10 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">${escapeHtml(windowLabel)}</span>
             <span class="rolling-limit-amounts">${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}</span>
-            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;">${pct5h.toFixed(0)}%</span>
+            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;">${barPct5h.toFixed(0)}%</span>
           </div>
-          <div class="brand-limit-bar">
-            <div class="brand-limit-fill${style5h.class}" style="width: ${pct5h}%;"></div>
+          <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSource5h))}">
+            <div class="brand-limit-fill${style5h.class}" style="width: ${barPct5h}%;"></div>
           </div>
           <span class="reset-badge${style5h.class}" title="${escapeHtml(reset5hTooltip)}">&#x23F1; ${reset5hLabel}</span>
         </div>
@@ -358,10 +371,10 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">Weekly</span>
             <span class="rolling-limit-amounts">${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}</span>
-            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;">${pctWeekly.toFixed(0)}%</span>
+            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;">${barPctWeekly.toFixed(0)}%</span>
           </div>
-          <div class="brand-limit-bar">
-            <div class="brand-limit-fill${styleWeekly.class}" style="width: ${pctWeekly}%;"></div>
+          <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSourceWeekly))}">
+            <div class="brand-limit-fill${styleWeekly.class}" style="width: ${barPctWeekly}%;"></div>
           </div>
           <span class="reset-badge${styleWeekly.class}" title="${escapeHtml(resetWeeklyTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
         </div>
@@ -369,6 +382,28 @@ function renderBrandCards(brandData) {
     `;
     elements.brandCardsContainer.appendChild(card);
   });
+}
+
+function computeApiUsedPct(apiQuota, scope) {
+  if (!apiQuota) return null;
+  if (scope === '5h') {
+    if (apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number') {
+      return Math.max(0, Math.min(100, 100 - apiQuota.remaining));
+    }
+    if (apiQuota.unit === 'requests'
+        && typeof apiQuota.remaining === 'number'
+        && typeof apiQuota.limit_value === 'number'
+        && apiQuota.limit_value > 0) {
+      return Math.max(0, Math.min(100, ((apiQuota.limit_value - apiQuota.remaining) / apiQuota.limit_value) * 100));
+    }
+    return null;
+  }
+  if (scope === 'weekly') {
+    if (typeof apiQuota.weekly_remaining !== 'number') return null;
+    // Weekly is always reported as percent by the providers we integrate with.
+    return Math.max(0, Math.min(100, 100 - apiQuota.weekly_remaining));
+  }
+  return null;
 }
 
 
@@ -1096,11 +1131,22 @@ function fetchRealRTKData(forceRefresh = false) {
       const sortedCmds = [...commands].sort((a, b) => a.id - b.id);
 
       const isInitialLoad = lastSeenCommandId === 0;
-      const recentLogThreshold = isInitialLoad ? Math.max(0, sortedCmds.length - 15) : 0;
+      // The "last 15" window applies to LLM-classified commands only — shell
+      // noise (curl/grep/ls to localhost) shouldn't push real API calls out
+      // of the feed. Pre-count LLM commands to get an accurate threshold.
+      let llmCount = 0;
+      if (isInitialLoad) {
+        for (const cmd of sortedCmds) {
+          if (detectBrand(cmd.original_cmd)) llmCount++;
+        }
+      }
+      const recentLogThreshold = isInitialLoad ? Math.max(0, llmCount - 15) : 0;
+      let llmSeen = 0;
 
       sortedCmds.forEach((cmd, idx) => {
         const brandKey = detectBrand(cmd.original_cmd);
         if (!brandKey) return; // Skip non-LLM proxy commands
+        llmSeen++;
         const meta = state.brandMetadata[brandKey];
 
         // ADR-0003: disjoint model, input_tokens is the billed amount
@@ -1119,9 +1165,9 @@ function fetchRealRTKData(forceRefresh = false) {
           cmdText: cmd.original_cmd
         });
 
-        // On initial load, log the most recent 15 commands to populate the feed.
+        // On initial load, log the most recent 15 LLM commands to populate the feed.
         // On subsequent refreshes, log only genuinely new commands.
-        const shouldLog = isInitialLoad ? (idx >= recentLogThreshold) : (cmd.id > lastSeenCommandId);
+        const shouldLog = isInitialLoad ? (llmSeen > recentLogThreshold) : (cmd.id > lastSeenCommandId);
         if (shouldLog) {
           const totalAttempted = cmd.input_tokens + cmd.saved_tokens;
           const savedPercent = totalAttempted > 0 ? ((cmd.saved_tokens / totalAttempted) * 100).toFixed(0) : '0';

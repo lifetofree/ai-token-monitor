@@ -227,7 +227,7 @@ const server = http.createServer((req, res) => {
 
   // API Endpoint: Get brand quotas from DB
   if (req.method === 'GET' && req.url === '/api/seed-quotas') {
-    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, unit, raw_json, seeded_at, error FROM brand_quota";
+    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error FROM brand_quota";
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       let rows = [];
@@ -399,6 +399,7 @@ function ensureBrandQuotaTable() {
     limit_value INTEGER,
     reset_at INTEGER,
     reset_at_weekly INTEGER,
+    weekly_remaining INTEGER,
     unit TEXT,
     raw_json TEXT,
     seeded_at INTEGER,
@@ -409,14 +410,15 @@ function ensureBrandQuotaTable() {
       console.error('Failed to create brand_quota table:', error);
       return;
     }
-    // Idempotent migration: older DBs lack reset_at_weekly.
+    // Idempotent migrations: older DBs may lack these columns.
     execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN reset_at_weekly INTEGER"], () => {});
+    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN weekly_remaining INTEGER"], () => {});
   });
 }
 
 async function seedBrandQuotas(force) {
   const existing = await new Promise((resolve) => {
-    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, unit, raw_json, seeded_at, error FROM brand_quota";
+    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error FROM brand_quota";
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       if (error || !stdout.trim()) {
         resolve([]);
@@ -474,6 +476,7 @@ async function seedBrandQuotas(force) {
         limit_value: null,
         reset_at: null,
         reset_at_weekly: null,
+        weekly_remaining: null,
         unit: 'missing_key',
         raw_json: null,
         seeded_at: Date.now(),
@@ -488,6 +491,7 @@ async function seedBrandQuotas(force) {
           limit_value: fetched.limit_value,
           reset_at: fetched.reset_at,
           reset_at_weekly: fetched.reset_at_weekly || null,
+          weekly_remaining: fetched.weekly_remaining || null,
           unit: fetched.unit,
           raw_json: fetched.raw_json,
           seeded_at: Date.now(),
@@ -500,6 +504,7 @@ async function seedBrandQuotas(force) {
           limit_value: null,
           reset_at: null,
           reset_at_weekly: null,
+          weekly_remaining: null,
           unit: 'error',
           raw_json: null,
           seeded_at: Date.now(),
@@ -509,12 +514,13 @@ async function seedBrandQuotas(force) {
     }
 
     await new Promise((resolve) => {
-      const sql = `INSERT OR REPLACE INTO brand_quota (brand, remaining, limit_value, reset_at, reset_at_weekly, unit, raw_json, seeded_at, error) VALUES (
+      const sql = `INSERT OR REPLACE INTO brand_quota (brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error) VALUES (
         ${escapeSQLString(row.brand)},
         ${escapeSQLNumber(row.remaining)},
         ${escapeSQLNumber(row.limit_value)},
         ${escapeSQLNumber(row.reset_at)},
         ${escapeSQLNumber(row.reset_at_weekly)},
+        ${escapeSQLNumber(row.weekly_remaining)},
         ${escapeSQLString(row.unit)},
         ${escapeSQLString(row.raw_json ? JSON.stringify(row.raw_json) : null)},
         ${row.seeded_at},
@@ -747,6 +753,7 @@ function fetchMinimaxQuota(apiKey) {
             limit_value: null,
             reset_at: null,
             reset_at_weekly: null,
+            weekly_remaining: null,
             unit: 'error',
             raw_json: parsed || body,
             error: errMsg
@@ -760,6 +767,7 @@ function fetchMinimaxQuota(apiKey) {
             limit_value: null,
             reset_at: null,
             reset_at_weekly: null,
+            weekly_remaining: null,
             unit: 'error',
             raw_json: body,
             error: 'empty response'
@@ -802,12 +810,31 @@ function fetchMinimaxQuota(apiKey) {
           }
         }
 
+        // MiniMax embeds weekly window fields directly in the same entry (weekly_end_time,
+        // current_weekly_remaining_percent). Fall back to those when no separate weekly entry exists.
+        const resetAtWeekly = weeklyEntry
+          ? extractEndTime(weeklyEntry)
+          : (primary ? toEpochMs(primary.weekly_end_time || null) : null);
+
+        // Detect unit: MiniMax returns percent fields (0-100) rather than
+        // a hard count cap, so we synthesize limit_value=100 in that mode
+        // and tag the unit so the UI can render "% left" instead of "N / M".
+        const isPercent = primary && (
+          typeof primary.current_interval_remaining_percent === 'number' ||
+          typeof primary.usage_percent === 'number' ||
+          typeof primary.usagePercent === 'number'
+        );
+        const hasCount = primary && extractLimit(primary) !== null;
+        const unit = !primary ? 'not_exposed' : (isPercent && !hasCount ? 'percent' : (hasCount ? 'requests' : 'not_exposed'));
+        const limitValue = primary ? (extractLimit(primary) || (isPercent ? 100 : null)) : null;
+
         resolve({
           remaining: primary ? extractRemaining(primary) : null,
-          limit_value: primary ? extractLimit(primary) : null,
-          reset_at: primary && !weeklyEntry ? extractEndTime(primary) : null,
-          reset_at_weekly: weeklyEntry ? extractEndTime(weeklyEntry) : null,
-          unit: primary ? 'requests' : 'not_exposed',
+          limit_value: limitValue,
+          reset_at: (primary && weeklyEntry !== primary) ? extractEndTime(primary) : null,
+          reset_at_weekly: resetAtWeekly,
+          weekly_remaining: primary ? extractWeeklyRemaining(primary) : null,
+          unit,
           raw_json: parsed,
           error: null
         });
@@ -820,6 +847,7 @@ function fetchMinimaxQuota(apiKey) {
         limit_value: null,
         reset_at: null,
         reset_at_weekly: null,
+        weekly_remaining: null,
         unit: 'error',
         raw_json: null,
         error: e.message
@@ -846,13 +874,22 @@ function isWeeklyEntry(entry, fiveH_MS, sevenD_MS) {
 }
 
 function extractRemaining(entry) {
-  // Count-based fields win (per MiniMax docs); otherwise fall back to usage_percent
-  // which is REMAINING quota (not consumed), per the OpenClaw provider notes.
   if (typeof entry.current_interval_remaining_count === 'number') return entry.current_interval_remaining_count;
   if (typeof entry.current_window_remaining_count === 'number') return entry.current_window_remaining_count;
   if (typeof entry.remaining_count === 'number') return entry.remaining_count;
+  if (typeof entry.current_interval_remaining_percent === 'number') return entry.current_interval_remaining_percent;
   if (typeof entry.usage_percent === 'number') return entry.usage_percent;
   if (typeof entry.usagePercent === 'number') return entry.usagePercent;
+  return null;
+}
+
+function extractWeeklyRemaining(entry) {
+  if (typeof entry.current_weekly_remaining_percent === 'number') return entry.current_weekly_remaining_percent;
+  if (typeof entry.current_weekly_remaining_count === 'number') return entry.current_weekly_remaining_count;
+  if (typeof entry.weekly_remaining_percent === 'number') return entry.weekly_remaining_percent;
+  if (typeof entry.weekly_remaining_count === 'number') return entry.weekly_remaining_count;
+  if (typeof entry.weekly_usage_percent === 'number') return entry.weekly_usage_percent;
+  if (typeof entry.weeklyUsagePercent === 'number') return entry.weeklyUsagePercent;
   return null;
 }
 
