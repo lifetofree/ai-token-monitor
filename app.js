@@ -391,11 +391,20 @@ function renderBrandCards(brandData) {
     card.className = 'card brand-card';
     card.style.setProperty('--brand-color', getBrandColor(bKey));
 
+    // Per-brand last refresh timestamp (from /api/seed-quotas seeded_at).
+    // Shows when this brand's quota was last polled server-side; "—" until
+    // the first successful fetch. 24h format, kept short to fit under the header.
+    const lastRefreshMs = apiQuota && typeof apiQuota.seeded_at === 'number' ? apiQuota.seeded_at : null;
+    const lastRefreshLabel = lastRefreshMs
+      ? `Updated ${new Date(lastRefreshMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`
+      : 'Not yet refreshed';
+
     card.innerHTML = `
       <div class="brand-card-header">
         <span class="brand-name">${escapeHtml(meta.name)}</span>
         <span class="brand-cost-title">${rtkSpend ? rtkSpend.requestsWeekly : data.requests} reqs</span>
       </div>
+      <div class="brand-card-refresh" style="font-size:10px; color:var(--text-muted); margin-top:2px; font-family:monospace;" title="Last time this brand's quota was fetched from the provider API">⏱ ${lastRefreshLabel}</div>
 
       <div class="rolling-limits-stack" style="margin-top: 0; border-top: none; padding-top: 0;">
         <!-- 5-Hour rolling limit -->
