@@ -110,7 +110,6 @@ function initElements() {
     toggleSimBtn: document.getElementById('toggle-sim-btn'),
     simStatusIcon: document.getElementById('sim-status-icon'),
     simStatusText: document.getElementById('sim-status-text'),
-    openSimModalBtn: document.getElementById('open-sim-modal-btn'),
     openSettingsModalBtn: document.getElementById('open-settings-modal-btn'),
     clearLogsBtn: document.getElementById('clear-logs-btn'),
     exportCsvBtn: document.getElementById('export-csv-btn'),
@@ -119,8 +118,6 @@ function initElements() {
     settingsModal: document.getElementById('settings-modal'),
     pricingRatesForm: document.getElementById('pricing-rates-form'),
     pricingRatesFormFields: document.getElementById('pricing-rates-form-fields'),
-    simModal: document.getElementById('sim-modal'),
-    customRequestForm: document.getElementById('custom-request-form'),
 
     // Settings Tabs & Tokens
     tabRatesBtn: document.getElementById('tab-rates-btn'),
@@ -717,11 +714,7 @@ function setupEventListeners() {
   if (elements.openSettingsModalBtn) elements.openSettingsModalBtn.addEventListener('click', () => {
     openModal('settings-modal');
   });
-  
-  if (elements.openSimModalBtn) elements.openSimModalBtn.addEventListener('click', () => {
-    openModal('sim-modal');
-  });
-  
+
   // Close Modals on clicking outside overlay or pressing Escape
   window.addEventListener('click', (e) => {
     if (e.target.classList.contains('modal-overlay')) {
@@ -791,25 +784,6 @@ function setupEventListeners() {
     logEvent('SYSTEM', 'Custom LLM pricing models, limits, and API keys updated.');
   });
 
-
-  
-  // Form submission: Custom Request Simulation
-  if (elements.customRequestForm) elements.customRequestForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const brand = document.getElementById('sim-brand-select').value;
-    const input = parseInt(document.getElementById('sim-input-tokens').value);
-    const output = parseInt(document.getElementById('sim-output-tokens').value);
-    const hitRate = parseInt(document.getElementById('sim-caching-hit').value);
-    
-    const saved = Math.floor(input * (hitRate / 100));
-    
-    addRequest(brand, input, output, saved);
-    closeModal('sim-modal');
-    
-    // Force immediate screen refresh for direct user queries
-    calculateAndRenderDashboard();
-  });
-  
   // Table Sorting headers click
   document.querySelectorAll('.sortable-header').forEach(header => {
     header.addEventListener('click', (e) => {
