@@ -396,7 +396,7 @@ function renderBrandCards(brandData) {
     // the first successful fetch. 24h format, kept short to fit under the header.
     const lastRefreshMs = apiQuota && typeof apiQuota.seeded_at === 'number' ? apiQuota.seeded_at : null;
     const lastRefreshLabel = lastRefreshMs
-      ? `Updated ${new Date(lastRefreshMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`
+      ? `Updated ${new Date(lastRefreshMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}`
       : 'Not yet refreshed';
 
     card.innerHTML = `
@@ -546,7 +546,7 @@ function stampLastUpdated() {
   if (!elements.lastUpdatedText) return;
   const now = new Date();
   const date = now.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
-  const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
   elements.lastUpdatedText.textContent = `Updated ${date} ${time}`;
 }
 
