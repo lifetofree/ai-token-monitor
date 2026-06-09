@@ -87,6 +87,7 @@ function initElements() {
     // Timer Elements
     timerProgressRing: document.getElementById('timer-progress-ring'),
     timerText: document.getElementById('timer-text'),
+    lastUpdatedText: document.getElementById('last-updated-text'),
 
     // Global stat values
     valTotalRequests: document.getElementById('val-total-requests'),
@@ -161,6 +162,7 @@ function init() {
   if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
   fetchRealRTKData(true);
   connectRTKStream();
+  stampLastUpdated();
 }
 
 // 3. STATS LOGIC (Calculations & UI Rendering)
@@ -288,6 +290,14 @@ function renderBrandCards(brandData) {
       ? apiQuota.reset_at - now : null;
     const apiResetWeeklyMs = apiQuota && apiQuota.reset_at_weekly && apiQuota.reset_at_weekly > now
       ? apiQuota.reset_at_weekly - now : null;
+    // For brands whose API doesn't expose a 5h reset (e.g. GLM), the server
+    // tracks window_started_at (when the current 5h window's contents were
+    // first observed) and the reset is at most window_started_at + 5h.
+    const windowStartedReset5hMs = (apiReset5hMs === null
+      && apiQuota && typeof apiQuota.window_started_at === 'number'
+      && apiQuota.window_started_at > 0)
+      ? (apiQuota.window_started_at + FIVE_HOUR_WINDOW_MS) - now
+      : null;
 
     // Drive the progress bar from the provider's API quota when available.
     // For 'per_minute' (Claude): show the token bucket data when it's present
@@ -312,12 +322,17 @@ function renderBrandCards(brandData) {
     const rolling5hMs = data.earliest5hTimestamp !== null ? (data.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS) - now : null;
     const rollingWeeklyMs = data.earliestWeeklyTimestamp !== null ? (data.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS) - now : null;
 
-    const reset5hMs = apiReset5hMs !== null ? apiReset5hMs : rolling5hMs;
+    const reset5hMs = apiReset5hMs !== null
+      ? apiReset5hMs
+      : (windowStartedReset5hMs !== null ? windowStartedReset5hMs : rolling5hMs);
     const resetWeeklyMs = apiResetWeeklyMs !== null ? apiResetWeeklyMs : rollingWeeklyMs;
 
     const rollingTooltip = 'Rolling window: the oldest request in this window falls out at the shown time. With sustained traffic the window slides continuously rather than fully resetting.';
     const apiTooltip = 'Reset time from the provider API (authoritative window boundary).';
-    const reset5hTooltip = apiReset5hMs !== null ? apiTooltip : rollingTooltip;
+    const windowStartedTooltip = 'Reset is a 5h countdown from when the server first observed the current 5h window data; the actual reset is when the oldest request in the window drops out.';
+    const reset5hTooltip = apiReset5hMs !== null
+      ? apiTooltip
+      : (windowStartedReset5hMs !== null ? windowStartedTooltip : rollingTooltip);
     const resetWeeklyTooltip = apiResetWeeklyMs !== null ? apiTooltip : rollingTooltip;
 
     const reset5hLabel = reset5hMs !== null ? `Resets at ${new Date(now + reset5hMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(reset5hMs)})` : 'no active usage';
@@ -478,16 +493,23 @@ function startCountdownTimer() {
     if (refreshTimer <= 0) {
       fetchRealRTKData();
       fetchBrandQuotas();
-
-      // Spark visual indicator or countdown reset
+      stampLastUpdated();
       refreshTimer = REFRESH_INTERVAL_SECONDS;
     }
   }, 1000);
 }
 
+function stampLastUpdated() {
+  if (!elements.lastUpdatedText) return;
+  const now = new Date();
+  const date = now.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
+  const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  elements.lastUpdatedText.textContent = `Updated ${date} ${time}`;
+}
+
 function updateTimerUI() {
   elements.timerText.textContent = `Refreshes in ${refreshTimer}s`;
-  
+
   // Circle stroke math (total stroke size is ~44px)
   const offset = 44 - (44 * (refreshTimer / REFRESH_INTERVAL_SECONDS));
   elements.timerProgressRing.style.strokeDashoffset = offset;

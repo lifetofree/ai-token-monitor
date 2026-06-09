@@ -413,12 +413,19 @@ function ensureBrandQuotaTable() {
     // Idempotent migrations: older DBs may lack these columns.
     execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN reset_at_weekly INTEGER"], () => {});
     execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN weekly_remaining INTEGER"], () => {});
+    // window_started_at = epoch ms when the 5h window's *current* contents were
+    // first observed. Used as a fallback 5h reset boundary for brands whose
+    // API doesn't expose nextResetTime on the 5h window (e.g. GLM). The reset
+    // is at most window_started_at + 5h; the actual reset is when the oldest
+    // request in the window drops out, which we don't have direct visibility
+    // into. Persisted across server restarts.
+    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN window_started_at INTEGER"], () => {});
   });
 }
 
 async function seedBrandQuotas(force) {
   const existing = await new Promise((resolve) => {
-    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error FROM brand_quota";
+    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error, window_started_at FROM brand_quota";
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       if (error || !stdout.trim()) {
         resolve([]);
@@ -470,6 +477,10 @@ async function seedBrandQuotas(force) {
     const config = BRAND_FETCHERS[brand];
     const apiKey = env[config.envKey];
 
+    // Existing row from the DB (used to preserve window_started_at when the
+    // current fetch's data looks consistent with the previous observation).
+    const prev = existing.find(r => r.brand === brand) || null;
+
     let row;
     if (!apiKey) {
       row = {
@@ -482,11 +493,37 @@ async function seedBrandQuotas(force) {
         unit: 'missing_key',
         raw_json: null,
         seeded_at: Date.now(),
+        window_started_at: null,
         error: `no ${config.envKey} in .env`
       };
     } else {
       try {
         const fetched = await config.fetch(apiKey);
+        // 5h-window observation: if the API returned a usable 5h signal
+        // (remaining or limit_value is a number), record when we first saw
+        // THIS window's contents. If the signal looks consistent with the
+        // previous fetch (same remaining within tolerance), preserve the
+        // original window_started_at so the countdown keeps ticking down.
+        // Otherwise (reset detected: number dropped significantly, or first
+        // observation ever), start a fresh window at Date.now().
+        let windowStartedAt = prev ? prev.window_started_at : null;
+        const hasFreshSignal = fetched && (
+          (typeof fetched.remaining === 'number') ||
+          (typeof fetched.limit_value === 'number' && fetched.limit_value > 0)
+        );
+        if (hasFreshSignal) {
+          if (windowStartedAt === null || windowStartedAt === undefined) {
+            windowStartedAt = Date.now();
+          } else if (prev && typeof prev.remaining === 'number' && typeof fetched.remaining === 'number') {
+            // If remaining jumped UP significantly (>= 5%), the window reset
+            // (oldest request dropped out and a fresh window started).
+            if (fetched.remaining - prev.remaining >= 5) {
+              windowStartedAt = Date.now();
+            }
+          }
+        } else {
+          windowStartedAt = null;
+        }
         row = {
           brand,
           remaining: fetched.remaining,
@@ -497,6 +534,7 @@ async function seedBrandQuotas(force) {
           unit: fetched.unit,
           raw_json: fetched.raw_json,
           seeded_at: Date.now(),
+          window_started_at: windowStartedAt,
           error: fetched.error
         };
       } catch (err) {
@@ -510,13 +548,14 @@ async function seedBrandQuotas(force) {
           unit: 'error',
           raw_json: null,
           seeded_at: Date.now(),
+          window_started_at: null,
           error: err.message
         };
       }
     }
 
     await new Promise((resolve) => {
-      const sql = `INSERT OR REPLACE INTO brand_quota (brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error) VALUES (
+      const sql = `INSERT OR REPLACE INTO brand_quota (brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error, window_started_at) VALUES (
         ${escapeSQLString(row.brand)},
         ${escapeSQLNumber(row.remaining)},
         ${escapeSQLNumber(row.limit_value)},
@@ -526,7 +565,8 @@ async function seedBrandQuotas(force) {
         ${escapeSQLString(row.unit)},
         ${escapeSQLString(row.raw_json ? JSON.stringify(row.raw_json) : null)},
         ${row.seeded_at},
-        ${escapeSQLString(row.error)}
+        ${escapeSQLString(row.error)},
+        ${escapeSQLNumber(row.window_started_at)}
       );`;
       execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, sql], (error) => {
         resolve();
