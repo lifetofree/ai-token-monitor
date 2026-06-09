@@ -309,31 +309,65 @@ function renderBrandCards(brandData) {
       && apiQuota.limit_value > 0;
     const apiUsedPct5h = computeApiUsedPct(apiQuota, '5h');
     const apiUsedPctWeekly = computeApiUsedPct(apiQuota, 'weekly');
-    const barPct5h = apiUsedPct5h !== null ? apiUsedPct5h : pct5h;
-    const barPctWeekly = apiUsedPctWeekly !== null ? apiUsedPctWeekly : pctWeekly;
+
+    // RTK spend data: for percent-unit brands (GLM), rtk_spend comes from
+    // getRtkSpendMetrics() on the server. Used for cost-based bar percentages
+    // and rolling reset times when the quota API doesn't expose them.
+    const rtkSpend = (() => {
+      if (!apiQuota || !apiQuota.rtk_spend) return null;
+      const s = apiQuota.rtk_spend;
+      return {
+        cost5h: s.cost5h || 0,
+        costWeekly: s.costWeekly || 0,
+        requests5h: s.requests5h || 0,
+        requestsWeekly: s.requestsWeekly || 0,
+        reset5hAt: s.earliest5hTimestamp ? s.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS : null,
+        resetWeeklyAt: s.earliestWeeklyTimestamp ? s.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS : null,
+      };
+    })();
+
+    const rtkPct5h     = rtkSpend && limit5h > 0    ? Math.min(100, (rtkSpend.cost5h     / limit5h)     * 100) : null;
+    const rtkPctWeekly = rtkSpend && limitWeekly > 0 ? Math.min(100, (rtkSpend.costWeekly / limitWeekly) * 100) : null;
+
+    const barPct5h     = apiUsedPct5h     !== null ? apiUsedPct5h     : (rtkPct5h     !== null ? rtkPct5h     : pct5h);
+    const barPctWeekly = apiUsedPctWeekly !== null ? apiUsedPctWeekly : (rtkPctWeekly !== null ? rtkPctWeekly : pctWeekly);
     const style5h = getLimitStyle(barPct5h);
     const styleWeekly = getLimitStyle(barPctWeekly);
-    const barSource5h = apiUsedPct5h !== null ? 'api' : 'local';
-    const barSourceWeekly = apiUsedPctWeekly !== null ? 'api' : 'local';
+    const barSource5h     = apiUsedPct5h     !== null ? 'api' : (rtkPct5h     !== null ? 'rtk' : 'local');
+    const barSourceWeekly = apiUsedPctWeekly !== null ? 'api' : (rtkPctWeekly !== null ? 'rtk' : 'local');
     const barSourceTooltip = (src) => src === 'api'
       ? 'Bar driven by provider API quota (used %).'
-      : 'Bar driven by local rolling-window spend in this dashboard.';
+      : src === 'rtk'
+        ? 'Bar driven by RTK database (server-side aggregation).'
+        : 'Bar driven by local rolling-window spend in this dashboard.';
 
     const rolling5hMs = data.earliest5hTimestamp !== null ? (data.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS) - now : null;
     const rollingWeeklyMs = data.earliestWeeklyTimestamp !== null ? (data.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS) - now : null;
 
+    const rtkReset5hMs     = rtkSpend && rtkSpend.reset5hAt     && rtkSpend.reset5hAt     > now ? rtkSpend.reset5hAt     - now : null;
+    const rtkResetWeeklyMs = rtkSpend && rtkSpend.resetWeeklyAt && rtkSpend.resetWeeklyAt > now ? rtkSpend.resetWeeklyAt - now : null;
+
     const reset5hMs = apiReset5hMs !== null
       ? apiReset5hMs
-      : (windowStartedReset5hMs !== null ? windowStartedReset5hMs : rolling5hMs);
-    const resetWeeklyMs = apiResetWeeklyMs !== null ? apiResetWeeklyMs : rollingWeeklyMs;
+      : (windowStartedReset5hMs !== null
+        ? windowStartedReset5hMs
+        : (rtkReset5hMs !== null ? rtkReset5hMs : rolling5hMs));
+    const resetWeeklyMs = apiResetWeeklyMs !== null
+      ? apiResetWeeklyMs
+      : (rtkResetWeeklyMs !== null ? rtkResetWeeklyMs : rollingWeeklyMs);
 
     const rollingTooltip = 'Rolling window: the oldest request in this window falls out at the shown time. With sustained traffic the window slides continuously rather than fully resetting.';
     const apiTooltip = 'Reset time from the provider API (authoritative window boundary).';
     const windowStartedTooltip = 'Reset is a 5h countdown from when the server first observed the current 5h window data; the actual reset is when the oldest request in the window drops out.';
+    const rtkTooltip = 'Reset time from RTK local DB (rolling window boundary, server-side).';
     const reset5hTooltip = apiReset5hMs !== null
       ? apiTooltip
-      : (windowStartedReset5hMs !== null ? windowStartedTooltip : rollingTooltip);
-    const resetWeeklyTooltip = apiResetWeeklyMs !== null ? apiTooltip : rollingTooltip;
+      : (windowStartedReset5hMs !== null
+        ? windowStartedTooltip
+        : (rtkReset5hMs !== null ? rtkTooltip : rollingTooltip));
+    const resetWeeklyTooltip = apiResetWeeklyMs !== null
+      ? apiTooltip
+      : (rtkResetWeeklyMs !== null ? rtkTooltip : rollingTooltip);
 
     const reset5hLabel = reset5hMs !== null ? `Resets at ${new Date(now + reset5hMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(reset5hMs)})` : 'no active usage';
     const resetWeeklyLabel = resetWeeklyMs !== null ? `Resets at ${new Date(now + resetWeeklyMs).toLocaleDateString([], { month: 'short', day: 'numeric' })} ${new Date(now + resetWeeklyMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} (${formatTimeRemaining(resetWeeklyMs)})` : 'no active usage';
@@ -360,7 +394,7 @@ function renderBrandCards(brandData) {
     card.innerHTML = `
       <div class="brand-card-header">
         <span class="brand-name">${escapeHtml(meta.name)}</span>
-        <span class="brand-cost-title">${data.requests} reqs</span>
+        <span class="brand-cost-title">${rtkSpend ? rtkSpend.requestsWeekly : data.requests} reqs</span>
       </div>
 
       <div class="rolling-limits-stack" style="margin-top: 0; border-top: none; padding-top: 0;">

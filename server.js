@@ -712,7 +712,10 @@ function fetchGeminiQuota(apiKey) {
 function fetchGLMQuota(apiKey) {
   // Uses the Zhipu AI quota monitoring API to get 5-hour token limits
   // with remaining %, used/total tokens, and reset time.
-  return new Promise((resolve) => {
+  // Also fetches RTK spend metrics so the dashboard can show cost,
+  // token counts, and reset times from the RTK database alongside
+  // the percentage-based quota API data.
+  const apiPromise = new Promise((resolve) => {
     const req = https.request({
       hostname: 'bigmodel.cn',
       path: '/api/monitor/usage/quota/limit',
@@ -813,6 +816,12 @@ function fetchGLMQuota(apiKey) {
 
     req.end();
   });
+
+  return Promise.all([apiPromise, getRtkSpendMetrics()])
+    .then(([apiResult, allSpend]) => {
+      const rtkGlm = allSpend && allSpend.glm ? allSpend.glm : null;
+      return { ...apiResult, rtk_spend: rtkGlm };
+    });
 }
 
 function fetchMinimaxQuota(apiKey) {
