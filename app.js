@@ -310,20 +310,39 @@ function renderBrandCards(brandData) {
     const apiUsedPct5h = computeApiUsedPct(apiQuota, '5h');
     const apiUsedPctWeekly = computeApiUsedPct(apiQuota, 'weekly');
 
-    // RTK spend data: for percent-unit brands (GLM), rtk_spend comes from
-    // getRtkSpendMetrics() on the server. Used for cost-based bar percentages
-    // and rolling reset times when the quota API doesn't expose them.
+    // RTK spend data: server embeds RTK metrics in raw_json._rtk_spend (GLM)
+    // or uses raw_json directly as RTK spend (Claude). Used for cost-based bar
+    // percentages and rolling reset times.
     const rtkSpend = (() => {
-      if (!apiQuota || !apiQuota.rtk_spend) return null;
-      const s = apiQuota.rtk_spend;
-      return {
-        cost5h: s.cost5h || 0,
-        costWeekly: s.costWeekly || 0,
-        requests5h: s.requests5h || 0,
-        requestsWeekly: s.requestsWeekly || 0,
-        reset5hAt: s.earliest5hTimestamp ? s.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS : null,
-        resetWeeklyAt: s.earliestWeeklyTimestamp ? s.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS : null,
-      };
+      if (!apiQuota) return null;
+      // Claude: raw_json IS the RTK spend object (cost5h, requests5h, etc.)
+      if (isPerMinute && apiQuota.raw_json && typeof apiQuota.raw_json.cost5h === 'number') {
+        const s = apiQuota.raw_json;
+        return {
+          cost5h: s.cost5h || 0,
+          costWeekly: s.costWeekly || 0,
+          requests5h: s.requests5h || 0,
+          requestsWeekly: s.requestsWeekly || 0,
+          tokens5h: s.tokens5h || 0,
+          tokensWeekly: s.tokensWeekly || 0,
+          reset5hAt: s.reset5hAt || null,
+          resetWeeklyAt: s.resetWeeklyAt || null,
+        };
+      }
+      // GLM/other: _rtk_spend embedded in raw_json by seedBrandQuotas
+      const raw = apiQuota.raw_json;
+      if (raw && raw._rtk_spend) {
+        const s = raw._rtk_spend;
+        return {
+          cost5h: s.cost5h || 0,
+          costWeekly: s.costWeekly || 0,
+          requests5h: s.requests5h || 0,
+          requestsWeekly: s.requestsWeekly || 0,
+          reset5hAt: s.reset5hAt || (s.earliest5hTimestamp ? s.earliest5hTimestamp + FIVE_HOUR_WINDOW_MS : null),
+          resetWeeklyAt: s.resetWeeklyAt || (s.earliestWeeklyTimestamp ? s.earliestWeeklyTimestamp + ONE_WEEK_WINDOW_MS : null),
+        };
+      }
+      return null;
     })();
 
     const rtkPct5h     = rtkSpend && limit5h > 0    ? Math.min(100, (rtkSpend.cost5h     / limit5h)     * 100) : null;
@@ -379,32 +398,24 @@ function renderBrandCards(brandData) {
     const amounts5h = (apiQuota && apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number')
       ? `${apiQuota.remaining}% remaining`
       : isPerMinute
-        ? `${formatCompactNumber(data.tokens5h)} tokens · ${formatCurrency(data.cost5h)}`
+        ? `${formatCompactNumber(rtkSpend ? rtkSpend.tokens5h : data.tokens5h)} tokens · ${formatCurrency(rtkSpend ? rtkSpend.cost5h : data.cost5h)}`
         : `${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}`;
     const amountsWeekly = (apiQuota && typeof apiQuota.weekly_remaining === 'number')
       ? `${apiQuota.weekly_remaining}% remaining`
       : isPerMinute
-        ? `${formatCompactNumber(data.tokensWeekly)} tokens · ${formatCurrency(data.costWeekly)}`
+        ? `${formatCompactNumber(rtkSpend ? rtkSpend.tokensWeekly : data.tokensWeekly)} tokens · ${formatCurrency(rtkSpend ? rtkSpend.costWeekly : data.costWeekly)}`
         : `${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}`;
 
     const card = document.createElement('div');
     card.className = 'card brand-card';
     card.style.setProperty('--brand-color', getBrandColor(bKey));
 
-    // Per-brand last refresh timestamp (from /api/seed-quotas seeded_at).
-    // Shows when this brand's quota was last polled server-side; "—" until
-    // the first successful fetch. 24h format, kept short to fit under the header.
-    const lastRefreshMs = apiQuota && typeof apiQuota.seeded_at === 'number' ? apiQuota.seeded_at : null;
-    const lastRefreshLabel = lastRefreshMs
-      ? `Updated ${new Date(lastRefreshMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}`
-      : 'Not yet refreshed';
 
     card.innerHTML = `
       <div class="brand-card-header">
         <span class="brand-name">${escapeHtml(meta.name)}</span>
         <span class="brand-cost-title">${rtkSpend ? rtkSpend.requestsWeekly : data.requests} reqs</span>
       </div>
-      <div class="brand-card-refresh" style="font-size:10px; color:var(--text-muted); margin-top:2px; font-family:monospace;" title="Last time this brand's quota was fetched from the provider API">⏱ ${lastRefreshLabel}</div>
 
       <div class="rolling-limits-stack" style="margin-top: 0; border-top: none; padding-top: 0;">
         <!-- 5-Hour rolling limit -->
@@ -545,9 +556,8 @@ function startCountdownTimer() {
 function stampLastUpdated() {
   if (!elements.lastUpdatedText) return;
   const now = new Date();
-  const date = now.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
   const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
-  elements.lastUpdatedText.textContent = `Updated ${date} ${time}`;
+  elements.lastUpdatedText.textContent = `Updated ${time}`;
 }
 
 function updateTimerUI() {
@@ -1065,6 +1075,9 @@ function fetchBrandQuotas() {
       if (data.success && data.quotas) {
         state.brandQuotas = {};
         data.quotas.forEach(q => {
+          if (typeof q.raw_json === 'string') {
+            try { q.raw_json = JSON.parse(q.raw_json); } catch(e) { /* keep as-is */ }
+          }
           state.brandQuotas[q.brand] = q;
         });
         calculateAndRenderDashboard();
@@ -1094,6 +1107,9 @@ function triggerSilentQuotaSync(brandKey) {
       if (data.success && data.results) {
         if (!state.brandQuotas) state.brandQuotas = {};
         data.results.forEach(q => {
+          if (typeof q.raw_json === 'string') {
+            try { q.raw_json = JSON.parse(q.raw_json); } catch(e) { /* keep as-is */ }
+          }
           state.brandQuotas[q.brand] = q;
         });
         calculateAndRenderDashboard();

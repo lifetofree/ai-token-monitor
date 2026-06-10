@@ -532,7 +532,9 @@ async function seedBrandQuotas(force) {
           reset_at_weekly: fetched.reset_at_weekly || null,
           weekly_remaining: fetched.weekly_remaining || null,
           unit: fetched.unit,
-          raw_json: fetched.raw_json,
+          raw_json: fetched.rtk_spend
+            ? Object.assign({}, fetched.raw_json, { _rtk_spend: fetched.rtk_spend })
+            : fetched.raw_json,
           seeded_at: Date.now(),
           window_started_at: windowStartedAt,
           error: fetched.error
@@ -579,8 +581,122 @@ async function seedBrandQuotas(force) {
   return { cached: false, results, forced: force };
 }
 
-function fetchClaudeQuota(apiKey) {
+function getRtkSpendMetrics() {
   return new Promise((resolve) => {
+    const query = `SELECT timestamp, original_cmd, input_tokens, output_tokens, saved_tokens FROM commands ORDER BY id ASC`;
+    execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
+      if (error || !stdout.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        const rows = JSON.parse(stdout);
+        const METADATA = {
+          gemini: { inputCost: 1.25, outputCost: 5.00 },
+          claude: { inputCost: 3.00, outputCost: 15.00 },
+          minimax: { inputCost: 1.00, outputCost: 4.00 },
+          glm: { inputCost: 0.50, outputCost: 2.00 }
+        };
+
+        const now = Date.now();
+        const limit5h = 5 * 3600 * 1000;
+        const limitWk = 7 * 24 * 3600 * 1000;
+
+        const spend = {};
+        Object.keys(METADATA).forEach(key => {
+          spend[key] = {
+            cost5h: 0,
+            costWeekly: 0,
+            requests5h: 0,
+            requestsWeekly: 0,
+            input5h: 0,
+            inputWeekly: 0,
+            output5h: 0,
+            outputWeekly: 0,
+            savedTokens5h: 0,
+            savedTokensWeekly: 0,
+            tokens5h: 0,
+            tokensWeekly: 0,
+            earliest5hTimestamp: null,
+            earliestWeeklyTimestamp: null
+          };
+        });
+
+        let lastLlmBrand = 'claude';
+
+        function detectSpecificBrand(cmd) {
+          if (!cmd || typeof cmd !== 'string') return null;
+          const c = cmd.toLowerCase();
+          if (c.includes('gemini-proxy:') || c.includes('generativelanguage.googleapis.com') || c.includes('google-generative')) return 'gemini';
+          if (c.includes('minimax')) return 'minimax';
+          if (c.includes('glm') || c.includes('zhipu')) return 'glm';
+          if (c.includes('claude-proxy:') || c.includes('api.anthropic.com')) return 'claude';
+          return null;
+        }
+
+        rows.forEach(row => {
+          const specific = detectSpecificBrand(row.original_cmd);
+          if (specific) {
+            lastLlmBrand = specific;
+          }
+          const brandKey = lastLlmBrand;
+          const meta = METADATA[brandKey];
+          if (!meta) return;
+
+          const ts = new Date(row.timestamp).getTime();
+          if (isNaN(ts)) return;
+          const age = now - ts;
+          if (age < 0) return;
+
+          const cost = ((row.input_tokens * meta.inputCost) + (row.output_tokens * meta.outputCost)) / 1000000;
+          const s = spend[brandKey];
+
+          if (age <= limit5h) {
+            s.cost5h += cost;
+            s.requests5h++;
+            s.input5h += row.input_tokens || 0;
+            s.output5h += row.output_tokens || 0;
+            s.savedTokens5h += row.saved_tokens || 0;
+            s.tokens5h += (row.input_tokens || 0) + (row.output_tokens || 0) + (row.saved_tokens || 0);
+            if (s.earliest5hTimestamp === null || ts < s.earliest5hTimestamp) {
+              s.earliest5hTimestamp = ts;
+            }
+          }
+
+          if (age <= limitWk) {
+            s.costWeekly += cost;
+            s.requestsWeekly++;
+            s.inputWeekly += row.input_tokens || 0;
+            s.outputWeekly += row.output_tokens || 0;
+            s.savedTokensWeekly += row.saved_tokens || 0;
+            s.tokensWeekly += (row.input_tokens || 0) + (row.output_tokens || 0) + (row.saved_tokens || 0);
+            if (s.earliestWeeklyTimestamp === null || ts < s.earliestWeeklyTimestamp) {
+              s.earliestWeeklyTimestamp = ts;
+            }
+          }
+        });
+
+        // Add reset timestamps
+        Object.keys(spend).forEach(key => {
+          const s = spend[key];
+          s.reset5hAt = s.earliest5hTimestamp ? s.earliest5hTimestamp + limit5h : null;
+          s.resetWeeklyAt = s.earliestWeeklyTimestamp ? s.earliestWeeklyTimestamp + limitWk : null;
+        });
+
+        resolve(spend);
+      } catch (e) {
+        console.error('Failed to parse RTK spend metrics:', e);
+        resolve({});
+      }
+    });
+  });
+}
+
+function fetchClaudeQuota(apiKey) {
+  // Run the Anthropic API probe (for per-minute token bucket headers) and the
+  // RTK DB aggregation in parallel. RTK stats are stored in raw_json so the
+  // dashboard card gets Claude usage data even when the API key has zero credit.
+  const apiPromise = new Promise((resolve) => {
     const postData = JSON.stringify({
       model: 'claude-3-haiku-20240307',
       max_tokens: 1,
@@ -645,6 +761,12 @@ function fetchClaudeQuota(apiKey) {
     req.write(postData);
     req.end();
   });
+
+  return Promise.all([apiPromise, getRtkSpendMetrics()])
+    .then(([apiResult, allSpend]) => {
+      const rtkClaude = allSpend && allSpend.claude ? allSpend.claude : null;
+      return { ...apiResult, raw_json: rtkClaude };
+    });
 }
 
 function fetchGeminiQuota(apiKey) {
