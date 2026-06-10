@@ -19,6 +19,12 @@ const MIME_TYPES = {
 const homeDir = process.env.HOME || '/Users/lifetofree';
 const DB_PATH = process.env.RTK_DB_PATH || path.join(homeDir, 'Library/Application Support/rtk/history.db');
 
+function parseRawJson(val) {
+  if (!val) return null;
+  if (typeof val === 'object') return val;
+  try { return JSON.parse(val); } catch (e) { return null; }
+}
+
 let sseClients = [];
 let lastSeenDbId = 0;
 
@@ -578,7 +584,73 @@ async function seedBrandQuotas(force) {
     results.push(row);
   }
 
+  // Push to Firebase for ESP32 companion — await so the PUT completes before returning.
+  await publishToFirebase(results).catch(e => console.error('[firebase]', e?.message));
+
   return { cached: false, results, forced: force };
+}
+
+// Publishes the quota snapshot to Firebase Realtime Database.
+// Payload shape matches firmware/esp32-display/esp32-display.ino expectations:
+//   quotas.{brand}: remaining, limit_value, weekly_remaining, unit, reset_at,
+//                   reset_at_weekly, error, seeded_at, spend_pct5h,
+//                   spend_pct_weekly, spend_reqs5h, spend_reqs_wk,
+//                   tokens5h, cost5h, tokens_wk, cost_wk
+async function publishToFirebase(results) {
+  const env    = loadEnv();
+  const dbUrl  = env.FIREBASE_URL  || env.FIREBASE_DB_URL  || process.env.FIREBASE_URL  || process.env.FIREBASE_DB_URL;
+  const secret = env.FIREBASE_AUTH || env.FIREBASE_DB_SECRET || process.env.FIREBASE_AUTH || process.env.FIREBASE_DB_SECRET;
+  if (!dbUrl || !secret) return;
+
+  const NAMES = { gemini: 'Gemini', claude: 'Claude', minimax: 'Minimax', glm: 'GLM' };
+  const SPEND_LIMITS = {
+    gemini:  { limit5h: 2.00,  limitWeekly: 15.00 },
+    claude:  { limit5h: 5.00,  limitWeekly: 30.00 },
+    minimax: { limit5h: 2.00,  limitWeekly: 15.00 },
+    glm:     { limit5h: 0.80,  limitWeekly:  6.00 },
+  };
+
+  const payload = { lastUpdated: Date.now(), quotas: {} };
+
+  for (const r of results) {
+    const rtk  = parseRawJson(r.raw_json);
+    const lim  = SPEND_LIMITS[r.brand] || { limit5h: 2, limitWeekly: 15 };
+    const tok5 = rtk && rtk.tokens5h    ? Math.round(rtk.tokens5h)    : 0;
+    const tokW = rtk && rtk.tokensWeekly ? Math.round(rtk.tokensWeekly) : 0;
+    const c5   = rtk && rtk.cost5h      ? rtk.cost5h      : 0;
+    const cW   = rtk && rtk.costWeekly  ? rtk.costWeekly  : 0;
+    const r5   = rtk && rtk.requests5h  ? rtk.requests5h  : 0;
+    const rW   = rtk && rtk.requestsWeekly ? rtk.requestsWeekly : 0;
+
+    payload.quotas[r.brand] = {
+      name:             NAMES[r.brand] || r.brand,
+      remaining:        r.remaining        !== null ? r.remaining        : -1,
+      limit_value:      r.limit_value      !== null ? r.limit_value      : -1,
+      weekly_remaining: r.weekly_remaining !== null ? r.weekly_remaining : -1,
+      unit:             r.unit             || 'not_exposed',
+      reset_at:         r.reset_at         || 0,
+      reset_at_weekly:  r.reset_at_weekly  || 0,
+      error:            r.error            || '',
+      seeded_at:        r.seeded_at        || Date.now(),
+      spend_pct5h:      tok5 > 0 ? Math.min(100, Math.round((c5  / lim.limit5h)     * 100)) : 0,
+      spend_pct_weekly: tokW > 0 ? Math.min(100, Math.round((cW  / lim.limitWeekly) * 100)) : 0,
+      spend_reqs5h:     r5,
+      spend_reqs_wk:    rW,
+      tokens5h:         tok5,
+      cost5h:           parseFloat(c5.toFixed(4)),
+      tokens_wk:        tokW,
+      cost_wk:          parseFloat(cW.toFixed(4)),
+    };
+  }
+
+  const firebaseUrl = `${dbUrl.replace(/\/$/, '')}/display.json?auth=${encodeURIComponent(secret)}`;
+  const res = await fetch(firebaseUrl, {
+    method:  'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(payload),
+    signal:  AbortSignal.timeout(8000),
+  });
+  if (!res.ok) console.error(`[firebase] PUT ${res.status}`);
 }
 
 function getRtkSpendMetrics() {
@@ -622,24 +694,21 @@ function getRtkSpendMetrics() {
           };
         });
 
-        let lastLlmBrand = 'claude';
-
+        // Explicit-match only — no lastLlmBrand fallback.
+        // Commands that don't match Gemini/MiniMax/GLM patterns are Claude tool
+        // calls (Claude Code shell interceptions). This stays correct when multiple
+        // providers are active (e.g. after `rtk init --gemini`).
         function detectSpecificBrand(cmd) {
-          if (!cmd || typeof cmd !== 'string') return null;
+          if (!cmd || typeof cmd !== 'string') return 'claude'; // unmatched = Claude
           const c = cmd.toLowerCase();
           if (c.includes('gemini-proxy:') || c.includes('generativelanguage.googleapis.com') || c.includes('google-generative')) return 'gemini';
           if (c.includes('minimax')) return 'minimax';
           if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-          if (c.includes('claude-proxy:') || c.includes('api.anthropic.com')) return 'claude';
-          return null;
+          return 'claude'; // everything else is a Claude Code tool call
         }
 
         rows.forEach(row => {
-          const specific = detectSpecificBrand(row.original_cmd);
-          if (specific) {
-            lastLlmBrand = specific;
-          }
-          const brandKey = lastLlmBrand;
+          const brandKey = detectSpecificBrand(row.original_cmd);
           const meta = METADATA[brandKey];
           if (!meta) return;
 

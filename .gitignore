@@ -32,3 +32,4 @@ coverage/
 *.lcov
 
 .claude/
+firmware/esp32-display/secrets.h
