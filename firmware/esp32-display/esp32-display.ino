@@ -38,7 +38,7 @@ Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, OLED_RST);
 // ----------------------------- BRAND MODEL -----------------------------------
 struct BrandInfo { const char* key; const char* name; const char* windowTag; };
 const BrandInfo BRANDS[] = {
-  { "gemini",  "Gemini",  "5h" },
+  { "gemini",  "Antigravity",  "5h" },
   { "claude",  "Claude",  "pm" },   // "pm" → label as "5h Rolling"
   { "minimax", "Minimax", "5h" },
   { "glm",     "GLM",     "5h" }
@@ -84,8 +84,12 @@ const uint32_t BTN_LONG_MS   = 1000UL;
 const uint32_t RETRY_MS      = 5UL  * 1000UL;
 
 // ----------------------------- NTP -------------------------------------------
+// GMT offset in seconds (UTC+7 = 7*3600). Adjust for your timezone.
+#define TZ_OFFSET_SEC  (7 * 3600)
+#define DST_OFFSET_SEC 0
+
 void syncNtp() {
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  configTime(TZ_OFFSET_SEC, DST_OFFSET_SEC, "pool.ntp.org", "time.nist.gov");
   for (uint8_t i = 0; i < 20; i++) {
     time_t t; time(&t);
     if (t > 1700000000) { timeSynced = true; return; }

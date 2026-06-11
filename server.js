@@ -3,6 +3,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { exec, execFile } = require('child_process');
+const { parseAllTranscripts } = require('./lib/antigravity-parser');
 
 const PORT = 3000;
 const STATIC_ROOT = path.resolve(__dirname);
@@ -266,6 +267,50 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // API Endpoint: Get Antigravity CLI transcript/agent usage metrics
+  if (req.method === 'GET' && req.url === '/api/agent-usage') {
+    const now = Date.now();
+    const fiveHoursAgo = now - 5 * 60 * 60 * 1000;
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+
+    const query = `SELECT 'total' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage UNION ALL SELECT '5h' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${fiveHoursAgo} UNION ALL SELECT 'weekly' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${sevenDaysAgo};`;
+
+    execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (error) {
+        res.end(JSON.stringify({ error: error.message }));
+        return;
+      }
+      try {
+        const rows = stdout.trim() ? JSON.parse(stdout) : [];
+        const result = {
+          total: { conversationsCount: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalCost: 0, earliestTimestamp: null },
+          window5h: { conversationsCount: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalCost: 0, earliestTimestamp: null },
+          weekly: { conversationsCount: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalCost: 0, earliestTimestamp: null }
+        };
+
+        rows.forEach(row => {
+          const stats = {
+            conversationsCount: row.count || 0,
+            inputTokens: row.input || 0,
+            outputTokens: row.output || 0,
+            cachedTokens: row.cached || 0,
+            totalCost: row.cost || 0,
+            earliestTimestamp: row.earliest || null
+          };
+          if (row.window === 'total') result.total = stats;
+          if (row.window === '5h') result.window5h = stats;
+          if (row.window === 'weekly') result.weekly = stats;
+        });
+
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.end(JSON.stringify({ error: 'Parse failed' }));
+      }
+    });
+    return;
+  }
+
   // Static Assets Handler — path traversal protected AND whitelisted
   const urlPath = req.url === '/' ? 'index.html' : req.url.split('?')[0];
   const filePath = path.resolve(STATIC_ROOT, urlPath.replace(/^\/+/, ''));
@@ -355,6 +400,9 @@ server.listen(PORT, () => {
   console.log(`AI Token Monitor running at http://localhost:${PORT}/`);
   initWatcher();
   ensureBrandQuotaTable();
+  ensureAgentUsageTable();
+  syncAgentUsage();
+  setInterval(syncAgentUsage, 2 * 60 * 1000); // Sync every 2 minutes
   seedBrandQuotas(false).then(out => {
     console.log(`Brand-quota seed (${out.cached ? 'cached' : 'fetched'}): ${out.results.length} records`);
   }).catch(err => {
@@ -398,6 +446,11 @@ function escapeSQLNumber(val) {
   return parseInt(val, 10);
 }
 
+function escapeSQLFloat(val) {
+  if (val === null || val === undefined || isNaN(val)) return 'NULL';
+  return parseFloat(val);
+}
+
 function ensureBrandQuotaTable() {
   const query = `CREATE TABLE IF NOT EXISTS brand_quota (
     brand TEXT PRIMARY KEY,
@@ -426,6 +479,43 @@ function ensureBrandQuotaTable() {
     // request in the window drops out, which we don't have direct visibility
     // into. Persisted across server restarts.
     execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN window_started_at INTEGER"], () => {});
+  });
+}
+
+function ensureAgentUsageTable() {
+  const query = `CREATE TABLE IF NOT EXISTS agent_usage (
+    conversation_id TEXT PRIMARY KEY,
+    last_updated INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cached_tokens INTEGER,
+    total_cost REAL
+  );`;
+  execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
+    if (error) {
+      console.error('Failed to create agent_usage table:', error);
+    }
+  });
+}
+
+function syncAgentUsage() {
+  const data = parseAllTranscripts();
+  if (!data || !data.sessions || data.sessions.length === 0) return;
+
+  data.sessions.forEach(session => {
+    const query = `INSERT OR REPLACE INTO agent_usage (conversation_id, last_updated, input_tokens, output_tokens, cached_tokens, total_cost) VALUES (
+      ${escapeSQLString(session.conversationId)},
+      ${escapeSQLNumber(session.lastModified)},
+      ${escapeSQLNumber(session.inputTokens)},
+      ${escapeSQLNumber(session.outputTokens)},
+      ${escapeSQLNumber(session.cachedTokens)},
+      ${escapeSQLFloat(session.totalCost)}
+    );`;
+    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
+      if (error) {
+        console.error(`Failed to sync agent session ${session.conversationId}:`, error);
+      }
+    });
   });
 }
 
@@ -602,7 +692,7 @@ async function publishToFirebase(results) {
   const secret = env.FIREBASE_AUTH || env.FIREBASE_DB_SECRET || process.env.FIREBASE_AUTH || process.env.FIREBASE_DB_SECRET;
   if (!dbUrl || !secret) return;
 
-  const NAMES = { gemini: 'Gemini', claude: 'Claude', minimax: 'Minimax', glm: 'GLM' };
+  const NAMES = { gemini: 'Antigravity', claude: 'Claude', minimax: 'Minimax', glm: 'GLM' };
   const SPEND_LIMITS = {
     gemini:  { limit5h: 2.00,  limitWeekly: 15.00 },
     claude:  { limit5h: 5.00,  limitWeekly: 30.00 },
@@ -610,17 +700,109 @@ async function publishToFirebase(results) {
     glm:     { limit5h: 0.80,  limitWeekly:  6.00 },
   };
 
+  const allSpend = await getRtkSpendMetrics();
+  const agentUsage = await new Promise((resolve) => {
+    const now = Date.now();
+    const fiveHoursAgo = now - 5 * 60 * 60 * 1000;
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const query = `SELECT 'total' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage UNION ALL SELECT '5h' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${fiveHoursAgo} UNION ALL SELECT 'weekly' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${sevenDaysAgo};`;
+    execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
+      if (error || !stdout.trim()) {
+        resolve(null);
+        return;
+      }
+      try {
+        const rows = JSON.parse(stdout);
+        const res = {
+          total: { count: 0, input: 0, output: 0, cost: 0, earliest: null },
+          window5h: { count: 0, input: 0, output: 0, cost: 0, earliest: null },
+          weekly: { count: 0, input: 0, output: 0, cost: 0, earliest: null }
+        };
+        rows.forEach(row => {
+          const stats = { count: row.count || 0, input: row.input || 0, output: row.output || 0, cost: row.cost || 0, earliest: row.earliest || null };
+          if (row.window === 'total') res.total = stats;
+          if (row.window === '5h') res.window5h = stats;
+          if (row.window === 'weekly') res.weekly = stats;
+        });
+        resolve(res);
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  });
+
   const payload = { lastUpdated: Date.now(), quotas: {} };
 
   for (const r of results) {
-    const rtk  = parseRawJson(r.raw_json);
+    let rtk  = parseRawJson(r.raw_json);
+    
+    // For GLM, check if raw_json has _rtk_spend
+    if (r.brand === 'glm' && rtk && rtk._rtk_spend) {
+      rtk = rtk._rtk_spend;
+    }
+
     const lim  = SPEND_LIMITS[r.brand] || { limit5h: 2, limitWeekly: 15 };
-    const tok5 = rtk && rtk.tokens5h    ? Math.round(rtk.tokens5h)    : 0;
-    const tokW = rtk && rtk.tokensWeekly ? Math.round(rtk.tokensWeekly) : 0;
-    const c5   = rtk && rtk.cost5h      ? rtk.cost5h      : 0;
-    const cW   = rtk && rtk.costWeekly  ? rtk.costWeekly  : 0;
-    const r5   = rtk && rtk.requests5h  ? rtk.requests5h  : 0;
-    const rW   = rtk && rtk.requestsWeekly ? rtk.requestsWeekly : 0;
+    let tok5 = rtk && rtk.tokens5h    ? Math.round(rtk.tokens5h)    : 0;
+    let tokW = rtk && rtk.tokensWeekly ? Math.round(rtk.tokensWeekly) : 0;
+    let c5   = rtk && rtk.cost5h      ? rtk.cost5h      : 0;
+    let cW   = rtk && rtk.costWeekly  ? rtk.costWeekly  : 0;
+    let r5   = rtk && rtk.requests5h  ? rtk.requests5h  : 0;
+    let rW   = rtk && rtk.requestsWeekly ? rtk.requestsWeekly : 0;
+
+    let resetAt = r.reset_at || 0;
+    let resetAtWeekly = r.reset_at_weekly || 0;
+
+    if (r.brand === 'gemini') {
+      const rtkGemini = allSpend && allSpend.gemini ? allSpend.gemini : null;
+      const agent5hTokens = agentUsage ? (agentUsage.window5h.input + agentUsage.window5h.output) : 0;
+      const agentWkTokens = agentUsage ? (agentUsage.weekly.input + agentUsage.weekly.output) : 0;
+      const agent5hCost = agentUsage ? agentUsage.window5h.cost : 0.0;
+      const agentWkCost = agentUsage ? agentUsage.weekly.cost : 0.0;
+      const agent5hCount = agentUsage ? agentUsage.window5h.count : 0;
+      const agentWkCount = agentUsage ? agentUsage.weekly.count : 0;
+
+      tok5 = (rtkGemini ? Math.round(rtkGemini.tokens5h) : 0) + agent5hTokens;
+      tokW = (rtkGemini ? Math.round(rtkGemini.tokensWeekly) : 0) + agentWkTokens;
+      c5   = (rtkGemini ? rtkGemini.cost5h : 0.0) + agent5hCost;
+      cW   = (rtkGemini ? rtkGemini.costWeekly : 0.0) + agentWkCost;
+      r5   = (rtkGemini ? rtkGemini.requests5h : 0) + agent5hCount;
+      rW   = (rtkGemini ? rtkGemini.requestsWeekly : 0) + agentWkCount;
+
+      const agentEarliest5h = agentUsage && agentUsage.window5h.earliest ? agentUsage.window5h.earliest : null;
+      const agentEarliestWk = agentUsage && agentUsage.weekly.earliest ? agentUsage.weekly.earliest : null;
+      const rtkEarliest5h = rtkGemini && rtkGemini.earliest5hTimestamp ? rtkGemini.earliest5hTimestamp : null;
+      const rtkEarliestWk = rtkGemini && rtkGemini.earliestWeeklyTimestamp ? rtkGemini.earliestWeeklyTimestamp : null;
+
+      let earliest5h = null;
+      if (agentEarliest5h !== null && rtkEarliest5h !== null) {
+        earliest5h = Math.min(agentEarliest5h, rtkEarliest5h);
+      } else {
+        earliest5h = agentEarliest5h !== null ? agentEarliest5h : rtkEarliest5h;
+      }
+
+      let earliestWk = null;
+      if (agentEarliestWk !== null && rtkEarliestWk !== null) {
+        earliestWk = Math.min(agentEarliestWk, rtkEarliestWk);
+      } else {
+        earliestWk = agentEarliestWk !== null ? agentEarliestWk : rtkEarliestWk;
+      }
+
+      if (earliest5h !== null) {
+        resetAt = earliest5h + 5 * 3600 * 1000;
+      }
+      if (earliestWk !== null) {
+        resetAtWeekly = earliestWk + 7 * 24 * 3600 * 1000;
+      }
+    }
+
+    // Claude: reset_at from Anthropic API is the per-minute token-bucket reset
+    // (~1 min away) — useless for the OLED display. Override with RTK rolling
+    // window boundaries so the ESP32 shows the same 5h/weekly times as the web.
+    if (r.brand === 'claude') {
+      const rtkClaude = allSpend && allSpend.claude ? allSpend.claude : null;
+      if (rtkClaude && rtkClaude.reset5hAt)     resetAt       = rtkClaude.reset5hAt;
+      if (rtkClaude && rtkClaude.resetWeeklyAt) resetAtWeekly = rtkClaude.resetWeeklyAt;
+    }
 
     payload.quotas[r.brand] = {
       name:             NAMES[r.brand] || r.brand,
@@ -628,8 +810,8 @@ async function publishToFirebase(results) {
       limit_value:      r.limit_value      !== null ? r.limit_value      : -1,
       weekly_remaining: r.weekly_remaining !== null ? r.weekly_remaining : -1,
       unit:             r.unit             || 'not_exposed',
-      reset_at:         r.reset_at         || 0,
-      reset_at_weekly:  r.reset_at_weekly  || 0,
+      reset_at:         resetAt,
+      reset_at_weekly:  resetAtWeekly,
       error:            r.error            || '',
       seeded_at:        r.seeded_at        || Date.now(),
       spend_pct5h:      tok5 > 0 ? Math.min(100, Math.round((c5  / lim.limit5h)     * 100)) : 0,

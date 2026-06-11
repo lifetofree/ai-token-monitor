@@ -21,7 +21,7 @@ function getBrandColor(key) {
 const FALLBACK_BRAND_COLOR = '#94a3b8';
 
 const DEFAULT_BRAND_METADATA = {
-  gemini: { name: 'Gemini', inputCost: 1.25, outputCost: 5.00, color: 'var(--color-gemini)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
+  gemini: { name: 'Antigravity', inputCost: 1.25, outputCost: 5.00, color: 'var(--color-gemini)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
   claude: { name: 'Claude', inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)', limit: 100.00, limit5h: 5.00, limitWeekly: 30.00, windowLabel: '5-Hour' },
   minimax: { name: 'Minimax', inputCost: 1.00, outputCost: 4.00, color: 'var(--color-minimax)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
   glm: { name: 'GLM', inputCost: 0.50, outputCost: 2.00, color: 'var(--color-glm)', limit: 20.00, limit5h: 0.80, limitWeekly: 6.00, windowLabel: '5-Hour' }
@@ -34,7 +34,8 @@ let state = {
   realCommands: [],
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
-  currentSort: { key: 'brand', direction: 'asc' }
+  currentSort: { key: 'brand', direction: 'asc' },
+  agentUsage: null
 };
 
 // Migration: Ensure new brands and fields exist in loaded state (older localStorage payloads)
@@ -58,6 +59,12 @@ Object.keys(state.brandMetadata).forEach(bKey => {
     delete state.brandMetadata[bKey];
   }
 });
+
+// Migration: If the name is "Gemini", rename it to "Antigravity"
+if (state.brandMetadata.gemini && state.brandMetadata.gemini.name === 'Gemini') {
+  state.brandMetadata.gemini.name = 'Antigravity';
+  localStorage.setItem('atm_brand_metadata', JSON.stringify(state.brandMetadata));
+}
 
 
 // UI Config — single source of truth for tunable constants
@@ -154,6 +161,7 @@ function init() {
   // Fetch API Keys/tokens from .env
   fetchAPIKeys();
   fetchBrandQuotas();
+  fetchAgentUsage();
 
   // Start countdown loops
   startCountdownTimer();
@@ -237,6 +245,31 @@ function calculateAndRenderDashboard() {
       globalSavings += req.savings;
     }
   });
+
+  // Inject agent usage into Gemini brand data if available
+  if (state.agentUsage && brandData.gemini) {
+    brandData.gemini.inputTokens += state.agentUsage.total.inputTokens;
+    brandData.gemini.outputTokens += state.agentUsage.total.outputTokens;
+    brandData.gemini.cost += state.agentUsage.total.totalCost;
+    brandData.gemini.cost5h += state.agentUsage.window5h.totalCost;
+    brandData.gemini.costWeekly += state.agentUsage.weekly.totalCost;
+    brandData.gemini.tokens5h += state.agentUsage.window5h.inputTokens + state.agentUsage.window5h.outputTokens;
+    brandData.gemini.tokensWeekly += state.agentUsage.weekly.inputTokens + state.agentUsage.weekly.outputTokens;
+    brandData.gemini.requests += state.agentUsage.total.conversationsCount;
+
+    if (state.agentUsage.window5h.earliestTimestamp) {
+      const agentEarliest5h = state.agentUsage.window5h.earliestTimestamp;
+      if (brandData.gemini.earliest5hTimestamp === null || agentEarliest5h < brandData.gemini.earliest5hTimestamp) {
+        brandData.gemini.earliest5hTimestamp = agentEarliest5h;
+      }
+    }
+    if (state.agentUsage.weekly.earliestTimestamp) {
+      const agentEarliestWeekly = state.agentUsage.weekly.earliestTimestamp;
+      if (brandData.gemini.earliestWeeklyTimestamp === null || agentEarliestWeekly < brandData.gemini.earliestWeeklyTimestamp) {
+        brandData.gemini.earliestWeeklyTimestamp = agentEarliestWeekly;
+      }
+    }
+  }
 
   // Render Global stats values
   elements.valTotalRequests.textContent = formatNumber(globalRequests);
@@ -547,6 +580,7 @@ function startCountdownTimer() {
     if (refreshTimer <= 0) {
       fetchRealRTKData();
       fetchBrandQuotas();
+      fetchAgentUsage();
       stampLastUpdated();
       refreshTimer = REFRESH_INTERVAL_SECONDS;
     }
@@ -1085,6 +1119,21 @@ function fetchBrandQuotas() {
     })
     .catch(err => {
       console.warn('Failed to fetch brand quotas:', err);
+    });
+}
+
+function fetchAgentUsage() {
+  fetch('/api/agent-usage')
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      state.agentUsage = data;
+      calculateAndRenderDashboard();
+    })
+    .catch(err => {
+      console.warn('Failed to fetch agent usage:', err);
     });
 }
 
