@@ -79,6 +79,9 @@ const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000;
 const ONE_WEEK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const ROLLING_LIMIT_WARN_PCT = 70;
 const ROLLING_LIMIT_DANGER_PCT = 90;
+const NOTIF_DEBOUNCE_MS = 30 * 60 * 1000; // 30 min per brand
+const _notifDebounce = new Map(); // brand → last notification timestamp
+
 let refreshTimer = REFRESH_INTERVAL_SECONDS;
 let refreshTimerIntervalId = null;
 let simulationTimeoutId = null;
@@ -170,6 +173,26 @@ function init() {
   fetchRealRTKData(true);
   connectRTKStream();
   stampLastUpdated();
+  requestNotificationPermission();
+}
+
+function requestNotificationPermission() {
+  if (!('Notification' in window) || Notification.permission !== 'default') return;
+  Notification.requestPermission();
+}
+
+function maybeFireQuotaNotification(bKey, pct) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (pct < ROLLING_LIMIT_DANGER_PCT) return;
+  const now = Date.now();
+  if (now - (_notifDebounce.get(bKey) || 0) < NOTIF_DEBOUNCE_MS) return;
+  _notifDebounce.set(bKey, now);
+  const meta = state.brandMetadata[bKey];
+  const name = meta ? meta.name : bKey;
+  new Notification(`${name} quota at ${pct.toFixed(0)}%`, {
+    body: `${name} has reached ${pct.toFixed(0)}% of its spending limit.`,
+    tag: `quota-${bKey}`
+  });
 }
 
 // 3. STATS LOGIC (Calculations & UI Rendering)
@@ -377,6 +400,7 @@ function renderBrandCards(brandData) {
 
     const barPct5h     = apiUsedPct5h     !== null ? apiUsedPct5h     : (rtkPct5h     !== null ? rtkPct5h     : pct5h);
     const barPctWeekly = apiUsedPctWeekly !== null ? apiUsedPctWeekly : (rtkPctWeekly !== null ? rtkPctWeekly : pctWeekly);
+    maybeFireQuotaNotification(bKey, Math.max(barPct5h, barPctWeekly));
     const style5h = getLimitStyle(barPct5h);
     const styleWeekly = getLimitStyle(barPctWeekly);
     const barSource5h     = apiUsedPct5h     !== null ? 'api' : (rtkPct5h     !== null ? 'rtk' : 'local');
