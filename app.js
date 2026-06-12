@@ -20,12 +20,21 @@ function getBrandColor(key) {
 
 const FALLBACK_BRAND_COLOR = '#94a3b8';
 
-const DEFAULT_BRAND_METADATA = {
+// PRICING_DEFAULTS is loaded from lib/pricing-defaults.js (must be included
+// BEFORE app.js in index.html). Single source of truth shared with the
+// server-side RTK aggregator at lib/rtk-metrics.js. The inline fallback
+// below is only reached if the UMD module failed to load (e.g. the static
+// handler returned 404 for the new path before the dev server was
+// restarted). It must be kept in sync with lib/pricing-defaults.js.
+const DEFAULT_BRAND_METADATA = window.PRICING_DEFAULTS || {
   gemini:  { name: 'Antigravity', inputCost: 1.25, outputCost: 5.00,  color: 'var(--color-gemini)',  limit5h: 2.00, limitWeekly: 15.00 },
   claude:  { name: 'Claude',      inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)',  limit5h: 5.00, limitWeekly: 30.00 },
   minimax: { name: 'Minimax',     inputCost: 1.00, outputCost: 4.00,  color: 'var(--color-minimax)', limit5h: 2.00, limitWeekly: 15.00 },
   glm:     { name: 'GLM',         inputCost: 0.50, outputCost: 2.00,  color: 'var(--color-glm)',     limit5h: 0.80, limitWeekly:  6.00 }
 };
+if (!window.PRICING_DEFAULTS) {
+  console.warn('[ai-token-monitor] lib/pricing-defaults.js did not load; using inline fallback. Restart the dev server to pick up the UMD module.');
+}
 
 // State variables
 let state = {

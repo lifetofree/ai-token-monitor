@@ -327,7 +327,7 @@ const server = http.createServer((req, res) => {
   }
 
   // Whitelist: only these files are servable. Prevents accidental leak of .env, package.json, server.js, etc.
-  const ALLOWED_STATIC = new Set(['index.html', 'app.js', 'styles.css', 'package.json', 'favicon.svg']);
+  const ALLOWED_STATIC = new Set(['index.html', 'app.js', 'styles.css', 'package.json', 'favicon.svg', 'lib/pricing-defaults.js']);
   if (!ALLOWED_STATIC.has(relative)) {
     res.writeHead(404, { 'Content-Type': 'text/html' });
     res.end('<h1>404 Not Found</h1>', 'utf-8');

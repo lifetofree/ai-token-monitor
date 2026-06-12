@@ -5,15 +5,16 @@
 
 import { describe, it, expect } from 'vitest';
 
-// Mirror of detectSpecificBrand from server.js (claude fallback, not null).
-// Unmatched commands are Claude Code tool calls intercepted by the RTK proxy.
+// Mirror of detectSpecificBrand from lib/rtk-metrics.js (returns null for unmatched).
+// Only commands with explicit brand markers are classified; shell commands return null.
 function detectSpecificBrand(cmd) {
-  if (!cmd || typeof cmd !== 'string') return 'claude';
+  if (!cmd || typeof cmd !== 'string') return null;
   const c = cmd.toLowerCase();
   if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
   if (c.includes('minimax')) return 'minimax';
   if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-  return 'claude';
+  if (c.includes('claude') || c.includes('anthropic')) return 'claude';
+  return null;
 }
 
 // Mirror of the core aggregation logic inside getRtkSpendMetrics
@@ -37,7 +38,7 @@ function processRtkRows(rows, now) {
 
   rows.forEach(row => {
     const brandKey = detectSpecificBrand(row.original_cmd);
-    if (!metrics[brandKey]) return;
+    if (!brandKey || !metrics[brandKey]) return;
 
     const reqTime = new Date(row.timestamp).getTime();
     const inputTok  = parseInt(row.input_tokens  || 0, 10);
@@ -151,20 +152,22 @@ describe('getRtkSpendMetrics aggregation logic', () => {
     expect(res.gemini.earliestWeeklyTimestamp).toBe(Date.parse(t3));
   });
 
-  it('excludes 0-token rows (shell commands) from request counts', () => {
-    // detectSpecificBrand maps ls/git to 'claude' — the 0-token guard must
-    // prevent them from inflating the Claude request count.
+  it('excludes unmatched shell commands from all metrics', () => {
+    // detectSpecificBrand returns null for ls/git/grep — they are excluded
+    // entirely, regardless of whether they have tokens.
     const rows = [
-      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'ls -la',            input_tokens: 0,   output_tokens: 0   },
-      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'git commit -m "x"', input_tokens: 0,   output_tokens: 0   },
+      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'ls -la',            input_tokens: 500, output_tokens: 200 },
+      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'git commit -m "x"', input_tokens: 300, output_tokens: 100 },
+      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'grep -rn pattern',  input_tokens: 0,   output_tokens: 0   },
       { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'curl https://api.anthropic.com/v1/messages', input_tokens: 500, output_tokens: 200 }
     ];
 
     const res = processRtkRows(rows, NOW);
 
-    // Only the real API call should count — shell commands (0 tokens) are excluded.
+    // Only the real Anthropic API call should count — ls/git/grep are excluded.
     expect(res.claude.requestsWeekly).toBe(1);
     expect(res.claude.requests5h).toBe(1);
     expect(res.claude.costWeekly).toBeGreaterThan(0);
+    expect(res.claude.cost5h).toBeGreaterThan(0);
   });
 });

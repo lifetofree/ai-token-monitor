@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "dev": "node server.js",
-    "check": "node --check server.js && node --check app.js",
+    "check": "node --check server.js app.js && for f in lib/*.js; do node --check \"$f\"; done",
     "test": "vitest run",
     "test:watch": "vitest"
   },
