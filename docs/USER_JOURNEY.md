@@ -46,17 +46,17 @@ This is the user explicitly checking the **provider-authoritative** view — the
 3. **Drill into a Brand card** to see its 5-Hour and Weekly bars; the cache effect is implicitly visible in the lower-than-expected Cost.
 4. **Export CSV** to share the numbers (e.g. paste into a notebook).
 
-## Tertiary journey: "Show me what the dashboard looks like."
+## Tertiary journey: "Show me what the dashboard looks like (Simulation)."
 
-1. **Reload the page** with the simulator running. The simulator generates synthetic Requests every 8-20s.
-2. **Open "Send Custom Request"** to fire a one-off Request with chosen Brand, token counts, and cache hit rate. Useful for verifying a Pricing change.
-3. **Pause the simulator** with the play/pause button to lock the dashboard in a stable state for a screenshot.
+1. **Select "Simulation"** from the monitor mode dropdown in the header.
+2. **Observe the dashboard** generating synthetic requests every 8-20 seconds to show dynamic data.
+3. **Switch back to "Real RTK Monitor"** to restore real-time telemetry.
 
 ## Edge case journeys
 
-### "I want to silence the simulator."
+### "I want to switch monitor modes."
 
-- Click `Pause Simulation` in the header. The status dot turns gray. The 5-Hour and Weekly bars continue to reflect the current Request set; no new Requests are generated.
+- Select between "Real RTK Monitor" and "Simulation" in the header dropdown. The console status dot will update to reflect the active mode (green for Real, yellow for Simulation), and the displayed history will swap.
 
 ### "I want to add a new API key."
 
@@ -67,9 +67,12 @@ This is the user explicitly checking the **provider-authoritative** view — the
 
 - Click `Reset Data` in the header. A confirm dialog appears. On confirm, the Request store is cleared, the console log is cleared, and the dashboard re-renders empty.
 
-### "I want to take a screenshot in a stable state."
+### "I want to verify the dashboard is reading my real RTK traffic."
 
-- Click `Pause Simulation`. Open `Send Custom Request` and fire a few one-off Requests to populate the aggregates to the desired shape. The dashboard now reflects the manually-built state and will not change until you `Resume Simulation`.
+- Ensure "Real RTK Monitor" is selected. Check that the console status dot is green.
+- Run a command proxied by RTK (e.g. `rtk gemini generate text` or run a Claude Code command).
+- Observe the command instantly appearing in the "Live Request Log Feed" console.
+- Confirm the corresponding Brand card's 5-Hour and Weekly bars increment, reflecting the new spend and tokens.
 
 ## UI design system
 

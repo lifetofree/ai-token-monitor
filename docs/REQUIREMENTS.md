@@ -136,3 +136,7 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 - i18n not in scope (limit labels are English-only).
 - No accessibility audit (keyboard nav, screen reader labels).
 - No error boundary in the UI — a single failed provider-quota fetch silently degrades the dashboard to local-spend view.
+
+## 5. Out of scope
+
+- Monthly / all-time historical aggregates (only 5-hour and 7-day rolling windows are exposed).

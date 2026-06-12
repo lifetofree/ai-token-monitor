@@ -133,11 +133,16 @@ This pass covers the four features that landed since R4: Real RTK Monitor Mode r
 - **What was found**: ⚠️ the R5 pass found and fixed: `BUSINESS_GOALS.md`, `STATUS.md`, `README.md`, `CONTEXT.md`, `REQUIREMENTS.md`, `USER_JOURNEY.md`, `TECH_STACK.md`, `SYSTEM_DESIGN.md` were all refreshed. `0005` and `0003` status lines updated. `0006` written.
 - **Action**: closed.
 
+### R5-C3 — Brand detection unification
+- **What was checked**: verify that duplicate `detectSpecificBrand` was removed and that both client and server use the unified brand detector `lib/brand-detect.js`.
+- **What was found**: ✅ unified under `lib/brand-detect.js` using UMD pattern. Unmatched commands correctly return `null` on both sides (and are dropped from spend aggregation on the server), ensuring consistent behavior. A Vitest checks equivalence across a fixture of 10 commands.
+- **Action**: closed.
+
 ### R5 summary
 
 | Severity | Count | Items |
 |---|---|---|
-| ✅ Pass | 8 | R5-C1, R5-C2, R5-S1, R5-S2, R5-S3, R5-D1, R5-U1, R5-U2, R5-U3, R5-U4, R5-ADR |
+| ✅ Pass | 12 | R5-C1, R5-C2, R5-C3, R5-S1, R5-S2, R5-S3, R5-D1, R5-U1, R5-U2, R5-U3, R5-U4, R5-ADR |
 | ⚠️ Documented gap | 3 | R5-X1 (cache staleness UX), R5-X2 (MiniMax field-name fragility), R5-D2 (pre-populated history disjoint audit) |
 | ❌ Regression | 0 | — |
 

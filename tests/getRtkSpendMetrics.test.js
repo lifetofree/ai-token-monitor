@@ -5,17 +5,10 @@
 
 import { describe, it, expect } from 'vitest';
 
-// Mirror of detectSpecificBrand from lib/rtk-metrics.js (falls back to 'claude').
-// RTK only records proxied commands, so unmatched = Claude Code tool call.
-function detectSpecificBrand(cmd) {
-  if (!cmd || typeof cmd !== 'string') return 'claude';
-  const c = cmd.toLowerCase();
-  if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
-  if (c.includes('minimax')) return 'minimax';
-  if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-  if (c.includes('claude') || c.includes('anthropic')) return 'claude';
-  return 'claude';
-}
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const { detectBrand } = require('../lib/brand-detect');
 
 // Mirror of the core aggregation logic inside getRtkSpendMetrics
 function processRtkRows(rows, now) {
@@ -37,7 +30,7 @@ function processRtkRows(rows, now) {
   };
 
   rows.forEach(row => {
-    const brandKey = detectSpecificBrand(row.original_cmd);
+    const brandKey = detectBrand(row.original_cmd);
     if (!metrics[brandKey]) return;
 
     const reqTime = new Date(row.timestamp).getTime();
@@ -152,10 +145,9 @@ describe('getRtkSpendMetrics aggregation logic', () => {
     expect(res.gemini.earliestWeeklyTimestamp).toBe(Date.parse(t3));
   });
 
-  it('classifies unmatched commands as claude but excludes 0-token rows', () => {
-    // detectSpecificBrand falls back to 'claude' — RTK only records proxied
-    // commands, so unmatched = Claude Code tool call. But 0-token rows
-    // (pure shell noise) are excluded from billing.
+  it('skips unmatched commands and excludes 0-token rows', () => {
+    // Unmatched commands (like ls -la, git commit) are skipped by detectBrand returning null.
+    // Explicit LLM calls (like anthropic messages) are captured.
     const rows = [
       { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'ls -la',            input_tokens: 500, output_tokens: 200 },
       { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'git commit -m "x"', input_tokens: 300, output_tokens: 100 },
@@ -165,10 +157,11 @@ describe('getRtkSpendMetrics aggregation logic', () => {
 
     const res = processRtkRows(rows, NOW);
 
-    // ls and git have tokens and are classified as Claude (tool calls).
-    // grep has 0 tokens and is excluded. The explicit anthropic call counts.
-    expect(res.claude.requestsWeekly).toBe(3);
-    expect(res.claude.requests5h).toBe(3);
+    // ls and git are unmatched and thus skipped.
+    // grep has 0 tokens and is also skipped/unmatched.
+    // Only the explicit anthropic call counts towards claude.
+    expect(res.claude.requestsWeekly).toBe(1);
+    expect(res.claude.requests5h).toBe(1);
     expect(res.claude.costWeekly).toBeGreaterThan(0);
     expect(res.claude.cost5h).toBeGreaterThan(0);
   });

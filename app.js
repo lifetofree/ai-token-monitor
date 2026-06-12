@@ -1294,9 +1294,8 @@ function connectRTKStream() {
 
 // Brand detection for RTK `original_cmd` strings. Returns null for shell
 // commands (git, ls, curl to localhost, etc.) so callers can skip them.
-// Delegated to lib/brand-detect.js (window.BrandDetect.detectBrand).
-// Server-side detectSpecificBrand in lib/rtk-metrics.js falls back to 'claude'
-// because RTK only records proxied commands.
+// Delegated to lib/brand-detect.js (window.BrandDetect.detectBrand), which is
+// shared between the client and the server.
 function detectBrand(cmd) { return BrandDetect.detectBrand(cmd); }
 
 // Run application!

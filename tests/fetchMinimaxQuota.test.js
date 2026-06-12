@@ -27,17 +27,28 @@ function pickField(obj, ...keys) {
   return null;
 }
 function extractRemaining(entry) {
-  return pickField(
-    entry,
+  const value = pickField(entry,
     'current_interval_remaining_percent',
-    'current_remaining_percent',
-    'current_remaining_count',
     'current_interval_remaining_count',
-    'current_window_remaining_count',
-    'remaining_count',
-    'usage_percent',
-    'usagePercent'
+    'current_window_remaining_count'
   );
+  if (value !== null) return value;
+
+  if (entry != null) {
+    const unobserved = [
+      'current_remaining_percent',
+      'current_remaining_count',
+      'remaining_count',
+      'usage_percent',
+      'usagePercent'
+    ];
+    const found = unobserved.find(k => entry[k] != null);
+    if (found) {
+      console.warn(`Unobserved MiniMax quota field detected: "${found}" with value ${entry[found]}`);
+      return entry[found];
+    }
+  }
+  return null;
 }
 function extractLimit(entry) {
   return pickField(entry, 'current_interval_total_count', 'limit', 'total_count', 'quota');
@@ -83,9 +94,18 @@ describe('MiniMax defensive parsers (mirror of server.js helpers)', () => {
     expect(extractRemaining({ current_interval_remaining_percent: 78 })).toBe(78);
   });
 
-  it('extractRemaining falls back through aliases', () => {
-    expect(extractRemaining({ usage_percent: 90 })).toBe(90);
-    expect(extractRemaining({ remaining_count: 42 })).toBe(42);
+  it('extractRemaining resolves observed aliases correctly', () => {
+    expect(extractRemaining({ current_interval_remaining_percent: 78 })).toBe(78);
+    expect(extractRemaining({ current_interval_remaining_count: 45 })).toBe(45);
+    expect(extractRemaining({ current_window_remaining_count: 22 })).toBe(22);
+  });
+
+  it('extractRemaining triggers warning on unobserved aliases but still returns value', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = extractRemaining({ usage_percent: 90 });
+    expect(res).toBe(90);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it('extractRemaining returns null when nothing matches', () => {
