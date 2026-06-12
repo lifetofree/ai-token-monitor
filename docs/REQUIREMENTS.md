@@ -114,10 +114,15 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 | AC-10 | The Brand `antigravity` does not appear in the Brand picker or Brand cards | Manual: open "Send Custom Request" |
 | AC-11 | Favicon loads without 404 | Manual: load `/favicon.svg` and inspect the network tab |
 | AC-12 | The header mode switcher exposes both "Real RTK Monitor" and "Simulation"; the selection persists in `localStorage` under `atm_monitor_mode` | Manual: switch modes, reload the page |
+| AC-12a | After page reload, the previously selected mode is restored from `localStorage.atm_monitor_mode` and `getActiveRequests()` returns the correct store | Vitest: set localStorage, call init, assert mode and store |
+| AC-12b | Switching mid-session from Real to Simulation does not lose `state.realCommands`; switching back restores them | Vitest: populate realCommands, switch to sim, switch back, assert length unchanged |
+| AC-12c | After a mode switch, the Live Request Log Feed updates to show the last 15 entries from the newly active store | Manual: switch modes, observe feed updates |
+| AC-12d | The console status dot reflects the active data source (green for Real SSE, yellow for Simulation) | Manual: observe dot after switching |
 | AC-13 | With a MiniMax API key present, the brand card's 5-hour bar fill width equals `100 - brandQuotas.minimax.remaining` (±1%) and the bar tooltip reads "Bar driven by provider API quota (used %)" | Manual: hover the bar, compare to the MiniMax web console |
 | AC-14 | When `brandQuotas[brandKey].reset_at` is in the future, the "Resets at HH:MM" badge shows the provider's timestamp (matching the MiniMax web console within ±1 minute), and the badge tooltip reads "Reset time from the provider API (authoritative window boundary)" | Manual: compare the badge time to the MiniMax web console |
 | AC-15 | `POST /api/seed-quotas {"force": true}` updates `brand_quota` rows within 3 seconds, and the dashboard re-renders the new values within one 30-second refresh tick | Manual: change a Provider cap externally, force-refresh, observe |
 | AC-16 | On initial load, the Live Request Log Feed contains only commands that pass `detectBrand()` (shell commands such as `curl`, `grep`, `ls` are filtered out of the last-15 window) | Manual: insert one LLM and one shell command via `sqlite3` directly, reload, confirm the feed shows only the LLM command |
+| AC-21 | After `POST /api/env/key?key=ANTHROPIC_API_KEY&value=new`, the `.env` file still contains the previous values of any non-whitelisted key (e.g. `RTK_DB_PATH`, `FIREBASE_URL`) | Vitest: write a multi-key `.env`, call the endpoint, assert all keys round-trip |
 
 ## 4. Known gaps
 

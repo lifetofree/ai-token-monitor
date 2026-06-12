@@ -1251,6 +1251,16 @@ function fetchRealRTKData(forceRefresh = false) {
     });
 }
 
+let _renderTimer = null;
+
+function scheduleDashboardRender() {
+  if (_renderTimer !== null) return; // already scheduled
+  _renderTimer = setTimeout(() => {
+    _renderTimer = null;
+    calculateAndRenderDashboard();
+  }, 200);
+}
+
 function connectRTKStream() {
   if (rtkEventSource) {
     rtkEventSource.close();
@@ -1304,7 +1314,7 @@ function connectRTKStream() {
           { text: formatCurrency(cost), cls: 'highlight-cost' }
         ]);
 
-        calculateAndRenderDashboard();
+        scheduleDashboardRender();
       }
     } catch (e) {
       console.error('Error processing real-time SSE stream packet:', e);
