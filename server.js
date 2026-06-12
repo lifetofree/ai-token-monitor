@@ -6,6 +6,9 @@ const { parseAllTranscripts } = require('./lib/antigravity-parser');
 const { BRAND_FETCHERS } = require('./lib/brand-fetchers');
 const { getRtkSpendMetrics } = require('./lib/rtk-metrics');
 const { publishToFirebase } = require('./lib/firebase');
+const { loadEnv, maskSecret, handleGetEnv, handlePostEnvKey, handlePostEnv } = require('./lib/env');
+const { DB_PATH, escapeSQLString, escapeSQLNumber, escapeSQLFloat, ensureBrandQuotaTable, readBrandQuotaRows, writeBrandQuotaRow, isCacheValid } = require('./lib/quota-cache');
+const { addSseClient, removeSseClient, initWatcher } = require('./lib/sse-watcher');
 
 const PORT = 3000;
 const STATIC_ROOT = path.resolve(__dirname);
@@ -18,19 +21,6 @@ const MIME_TYPES = {
   '.csv': 'text/csv',
   '.svg': 'image/svg+xml'
 };
-
-const homeDir = process.env.HOME || '/Users/lifetofree';
-const DB_PATH = process.env.RTK_DB_PATH || path.join(homeDir, 'Library/Application Support/rtk/history.db');
-
-let sseClients = [];
-let lastSeenDbId = 0;
-
-// Mask secrets before sending to the browser — never expose full keys in JS memory/DOM.
-function maskSecret(val) {
-  if (!val) return '';
-  if (val.length <= 8) return '****';
-  return '****' + val.slice(-4);
-}
 
 const server = http.createServer((req, res) => {
   // CORS: restrict to localhost only — prevents third-party sites from reading API keys
@@ -110,129 +100,29 @@ const server = http.createServer((req, res) => {
     
     // Heartbeat handshake
     res.write('data: {"status":"connected"}\n\n');
-    sseClients.push(res);
+    addSseClient(res);
     
     req.on('close', () => {
-      sseClients = sseClients.filter(c => c !== res);
+      removeSseClient(res);
     });
     return;
   }
 
   // API Endpoint: Get Current .env Configurations (masked)
   if (req.method === 'GET' && req.url === '/api/env') {
-    fs.readFile(path.join(STATIC_ROOT, '.env'), 'utf8', (err, data) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      if (err) {
-        res.end(JSON.stringify({}));
-        return;
-      }
-      const env = {};
-      data.split('\n').forEach(line => {
-        const index = line.indexOf('=');
-        if (index > 0) {
-          const key = line.substring(0, index).trim();
-          const val = line.substring(index + 1).trim();
-          // Return masked value to prevent full key exposure in browser DOM/JS memory
-          env[key] = maskSecret(val);
-        }
-      });
-      res.end(JSON.stringify(env));
-    });
+    handleGetEnv(req, res, STATIC_ROOT);
     return;
   }
 
   // API Endpoint: Save API key for a specific provider
-  // Frontend reads masked value back, user types full key to overwrite.
   if (req.method === 'POST' && req.url.startsWith('/api/env/key')) {
-    const urlObj = new URL(req.url, `http://localhost:${PORT}`);
-    const keyName = urlObj.searchParams.get('key');
-    const ALLOWED_KEYS = ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GLM_API_KEY', 'MINIMAX_API_KEY'];
-    if (!ALLOWED_KEYS.includes(keyName)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: 'Unknown key' }));
-      return;
-    }
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const { value } = JSON.parse(body);
-        if (typeof value !== 'string') {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'value must be a string' }));
-          return;
-        }
-        const sanitized = value.replace(/[\r\n]/g, '');
-        // Read existing .env, update only the requested key, preserve others
-        const envPath = path.join(STATIC_ROOT, '.env');
-        fs.readFile(envPath, 'utf8', (readErr, existing) => {
-          const lines = existing ? existing.split('\n') : [];
-          const map = {};
-          lines.forEach(line => {
-            const idx = line.indexOf('=');
-            if (idx > 0) map[line.substring(0, idx).trim()] = line.substring(idx + 1);
-          });
-          if (sanitized === '') {
-            delete map[keyName];
-          } else {
-            map[keyName] = sanitized;
-          }
-          // Write back all keys from the file (not just the whitelist) so non-API
-          // keys like RTK_DB_PATH and FIREBASE_* are preserved across saves.
-          const allKeys = Object.keys(map);
-          const newContent = allKeys.map(k => `${k}=${map[k]}`).join('\n') + '\n';
-          fs.writeFile(envPath, newContent, (writeErr) => {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            if (writeErr) {
-              res.end(JSON.stringify({ success: false, error: writeErr.message }));
-              return;
-            }
-            res.end(JSON.stringify({ success: true, masked: maskSecret(sanitized) }));
-          });
-        });
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
-      }
-    });
+    handlePostEnvKey(req, res, STATIC_ROOT);
     return;
   }
 
   // API Endpoint: Write and Update .env Configurations
   if (req.method === 'POST' && req.url === '/api/env') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const keys = JSON.parse(body);
-        const ALLOWED_KEYS = ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GLM_API_KEY', 'MINIMAX_API_KEY'];
-        const envPath = path.join(STATIC_ROOT, '.env');
-        const existing = (() => { try { return fs.readFileSync(envPath, 'utf8'); } catch (e) { return ''; } })();
-        const map = {};
-        existing.split('\n').forEach(line => {
-          const idx = line.indexOf('=');
-          if (idx > 0) map[line.substring(0, idx).trim()] = line.substring(idx + 1);
-        });
-        ALLOWED_KEYS.forEach(k => {
-          if (keys[k] && typeof keys[k] === 'string') {
-            map[k] = keys[k].replace(/[\r\n]/g, '');
-          }
-        });
-        const envContent = Object.keys(map).map(k => `${k}=${map[k]}`).join('\n') + '\n';
-
-        fs.writeFile(envPath, envContent, (err) => {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          if (err) {
-            res.end(JSON.stringify({ success: false, error: err.message }));
-            return;
-          }
-          res.end(JSON.stringify({ success: true }));
-        });
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
-      }
-    });
+    handlePostEnv(req, res, STATIC_ROOT);
     return;
   }
 
@@ -327,7 +217,7 @@ const server = http.createServer((req, res) => {
   }
 
   // Whitelist: only these files are servable. Prevents accidental leak of .env, package.json, server.js, etc.
-  const ALLOWED_STATIC = new Set(['index.html', 'app.js', 'styles.css', 'package.json', 'favicon.svg', 'lib/pricing-defaults.js']);
+  const ALLOWED_STATIC = new Set(['index.html', 'app.js', 'styles.css', 'package.json', 'favicon.svg', 'lib/pricing-defaults.js', 'lib/format.js', 'lib/dom-utils.js', 'lib/brand-detect.js']);
   if (!ALLOWED_STATIC.has(relative)) {
     res.writeHead(404, { 'Content-Type': 'text/html' });
     res.end('<h1>404 Not Found</h1>', 'utf-8');
@@ -353,60 +243,13 @@ const server = http.createServer((req, res) => {
   });
 });
 
-function initWatcher() {
-  // Sync the lastSeenDbId on startup to prevent broadcasting past history
-  const query = "SELECT id FROM commands ORDER BY id DESC LIMIT 1";
-  execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
-    if (!error && stdout.trim()) {
-      try {
-        const parsed = JSON.parse(stdout);
-        if (parsed.length > 0) {
-          lastSeenDbId = parsed[0].id;
-        }
-      } catch (e) {}
-    }
-  });
-
-  const dbDir = path.dirname(DB_PATH);
-  let watchTimeout = null;
-
-  if (fs.existsSync(dbDir)) {
-    fs.watch(dbDir, (eventType, filename) => {
-      if (filename && filename.startsWith('history.db')) {
-        // Debounce database read by 300ms to allow SQLite write locks to release
-        if (watchTimeout) clearTimeout(watchTimeout);
-        watchTimeout = setTimeout(checkForNewCommands, 300);
-      }
-    });
-  }
-}
-
-function checkForNewCommands() {
-  const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms FROM commands WHERE id > ${lastSeenDbId} ORDER BY id ASC`;
-  execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
-    if (error || !stdout.trim()) return;
-    try {
-      const parsed = JSON.parse(stdout);
-      if (parsed.length > 0) {
-        parsed.forEach(cmd => {
-          lastSeenDbId = Math.max(lastSeenDbId, cmd.id);
-          const payload = JSON.stringify(cmd);
-          sseClients.forEach(client => {
-            client.write(`data: ${payload}\n\n`);
-          });
-        });
-      }
-    } catch (e) {}
-  });
-}
-
 server.listen(PORT, () => {
   console.log(`AI Token Monitor running at http://localhost:${PORT}/`);
-  initWatcher();
+  initWatcher(DB_PATH);
   ensureBrandQuotaTable();
   ensureAgentUsageTable();
   syncAgentUsage();
-  setInterval(syncAgentUsage, 2 * 60 * 1000); // Sync every 2 minutes
+  setInterval(syncAgentUsage, 2 * 60 * 1000);
   seedBrandQuotas(false).then(out => {
     console.log(`Brand-quota seed (${out.cached ? 'cached' : 'fetched'}): ${out.results.length} records`);
   }).catch(err => {
@@ -416,75 +259,8 @@ server.listen(PORT, () => {
   try {
     const startCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
     exec(`${startCmd} http://localhost:${PORT}`);
-  } catch (e) {
-    // Ignore opening errors
-  }
-});
-
-function loadEnv() {
-  const env = {};
-  try {
-    const envPath = path.join(STATIC_ROOT, '.env');
-    if (fs.existsSync(envPath)) {
-      const data = fs.readFileSync(envPath, 'utf8');
-      data.split('\n').forEach(line => {
-        const index = line.indexOf('=');
-        if (index > 0) {
-          const key = line.substring(0, index).trim();
-          const val = line.substring(index + 1).trim();
-          env[key] = val;
-        }
-      });
-    }
   } catch (e) {}
-  return env;
-}
-
-function escapeSQLString(val) {
-  if (val === null || val === undefined) return 'NULL';
-  return "'" + String(val).replace(/'/g, "''") + "'";
-}
-
-function escapeSQLNumber(val) {
-  if (val === null || val === undefined || isNaN(val)) return 'NULL';
-  return parseInt(val, 10);
-}
-
-function escapeSQLFloat(val) {
-  if (val === null || val === undefined || isNaN(val)) return 'NULL';
-  return parseFloat(val);
-}
-
-function ensureBrandQuotaTable() {
-  const query = `CREATE TABLE IF NOT EXISTS brand_quota (
-    brand TEXT PRIMARY KEY,
-    remaining INTEGER,
-    limit_value INTEGER,
-    reset_at INTEGER,
-    reset_at_weekly INTEGER,
-    weekly_remaining INTEGER,
-    unit TEXT,
-    raw_json TEXT,
-    seeded_at INTEGER,
-    error TEXT
-  );`;
-  execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
-    if (error) {
-      console.error('Failed to create brand_quota table:', error);
-      return;
-    }
-    // Idempotent migrations: older DBs may lack these columns.
-    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN reset_at_weekly INTEGER"], () => {});
-    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN weekly_remaining INTEGER"], () => {});
-    // window_started_at = epoch ms when the 5h window's *current* contents were
-    // first observed. Used as a fallback 5h reset boundary for brands whose
-    // API doesn't expose nextResetTime on the 5h window (e.g. GLM). The reset
-    // is at most window_started_at + 5h; the actual reset is when the oldest
-    // request in the window drops out, which we don't have direct visibility
-    // into. Persisted across server restarts.
-    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, "ALTER TABLE brand_quota ADD COLUMN window_started_at INTEGER"], () => {});
-  });
-}
+});
 
 function ensureAgentUsageTable() {
   const query = `CREATE TABLE IF NOT EXISTS agent_usage (
@@ -531,53 +307,14 @@ function syncAgentUsage() {
 }
 
 async function seedBrandQuotas(force) {
-  const existing = await new Promise((resolve) => {
-    const query = "SELECT brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error, window_started_at FROM brand_quota";
-    execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
-      if (error || !stdout.trim()) {
-        resolve([]);
-      } else {
-        try {
-          resolve(JSON.parse(stdout));
-        } catch (e) {
-          resolve([]);
-        }
-      }
-    });
-  });
+  const existing = await readBrandQuotaRows();
 
   if (!force) {
-    let allValid = existing.length >= Object.keys(BRAND_FETCHERS).length;
-    const recent = [];
-    for (const r of existing) {
-      if (!r.seeded_at) {
-        allValid = false;
-        break;
-      }
-      // Invalidate cache when EITHER provider reset window has elapsed.
-      if (r.reset_at && Date.now() >= r.reset_at) {
-        allValid = false;
-        break;
-      }
-      if (r.reset_at_weekly && Date.now() >= r.reset_at_weekly) {
-        allValid = false;
-        break;
-      }
-      // Shorter cache for fast-reset providers (5h windows expire fast).
-      // MiniMax quota changes every few minutes; refresh every 3 min.
-      const maxAge = (r.reset_at || r.reset_at_weekly) ? (3 * 60 * 1000) : (60 * 1000);
-      if (Date.now() - r.seeded_at >= maxAge) {
-        allValid = false;
-        break;
-      }
-      recent.push(r);
-    }
-    if (allValid && recent.length >= Object.keys(BRAND_FETCHERS).length) {
-      return { cached: true, results: recent, forced: false };
-    }
+    const cached = isCacheValid(existing, BRAND_FETCHERS);
+    if (cached) return { cached: true, results: cached, forced: false };
   }
 
-  const env = loadEnv();
+  const env = loadEnv(STATIC_ROOT);
   const rtkSpend = await getRtkSpendMetrics();
   const results = [];
 
@@ -664,24 +401,7 @@ async function seedBrandQuotas(force) {
       }
     }
 
-    await new Promise((resolve) => {
-      const sql = `INSERT OR REPLACE INTO brand_quota (brand, remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, seeded_at, error, window_started_at) VALUES (
-        ${escapeSQLString(row.brand)},
-        ${escapeSQLNumber(row.remaining)},
-        ${escapeSQLNumber(row.limit_value)},
-        ${escapeSQLNumber(row.reset_at)},
-        ${escapeSQLNumber(row.reset_at_weekly)},
-        ${escapeSQLNumber(row.weekly_remaining)},
-        ${escapeSQLString(row.unit)},
-        ${escapeSQLString(row.raw_json ? JSON.stringify(row.raw_json) : null)},
-        ${row.seeded_at},
-        ${escapeSQLString(row.error)},
-        ${escapeSQLNumber(row.window_started_at)}
-      );`;
-      execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, sql], (error) => {
-        resolve();
-      });
-    });
+    await writeBrandQuotaRow(row);
 
     results.push(row);
   }
@@ -691,6 +411,3 @@ async function seedBrandQuotas(force) {
 
   return { cached: false, results, forced: force };
 }
-
-// publishToFirebase, getRtkSpendMetrics, httpsRequest, and all brand fetchers
-// live in lib/firebase.js, lib/rtk-metrics.js, and lib/brand-fetchers.js.

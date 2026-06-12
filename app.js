@@ -2,13 +2,8 @@
 
 // 1. CONSTANTS & METADATA
 
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+// escapeHtml delegated to lib/dom-utils.js (window.DomUtils.escapeHtml)
+function escapeHtml(str) { return DomUtils.escapeHtml(str); }
 
 // Brand color source of truth lives in styles.css. Read from CSS custom properties
 // so light/dark themes and any palette tweak flow through to JS automatically.
@@ -1043,40 +1038,11 @@ function exportToCSV() {
   logEvent('SYSTEM', 'Exported token statistics spreadsheet to CSV download.');
 }
 
-// 8. HELPER FORMATTERS
-function formatNumber(num) {
-  return num.toLocaleString();
-}
-
-function formatCompactNumber(num) {
-  if (num >= 1000000) {
-    return (num / 1000000).toFixed(1) + 'M';
-  }
-  if (num >= 1000) {
-    return (num / 1000).toFixed(1) + 'k';
-  }
-  return num.toString();
-}
-
-function formatCurrency(val) {
-  if (val === 0) return '$0.0000';
-  const sign = val < 0 ? '-' : '';
-  const abs = Math.abs(val);
-  if (abs < 0.01) {
-    return `${sign}$${abs.toFixed(5)}`;
-  }
-  return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
-}
-
-function formatTimeRemaining(ms) {
-  if (ms <= 0) return 'soon';
-  const days = Math.floor(ms / 86400000);
-  const hours = Math.floor((ms % 86400000) / 3600000);
-  const mins = Math.floor((ms % 3600000) / 60000);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${mins}m`;
-  return `${mins}m`;
-}
+// 8. HELPER FORMATTERS (delegated to lib/format.js — window.FormatUtils)
+function formatNumber(num) { return FormatUtils.formatNumber(num); }
+function formatCompactNumber(num) { return FormatUtils.formatCompactNumber(num); }
+function formatCurrency(val) { return FormatUtils.formatCurrency(val); }
+function formatTimeRemaining(ms) { return FormatUtils.formatTimeRemaining(ms); }
 
 // 9. SETTINGS & ENV UTILITIES
 
@@ -1328,18 +1294,10 @@ function connectRTKStream() {
 
 // Brand detection for RTK `original_cmd` strings. Returns null for shell
 // commands (git, ls, curl to localhost, etc.) so callers can skip them.
-// See also detectSpecificBrand() in server.js — same patterns but falls back
-// to 'claude' (not null) because in the RTK context unmatched commands are
-// typically Claude Code tool calls without an explicit 'anthropic' marker.
-function detectBrand(cmd) {
-  if (!cmd || typeof cmd !== 'string') return null;
-  const c = cmd.toLowerCase();
-  if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
-  if (c.includes('minimax')) return 'minimax';
-  if (c.includes('glm') || c.includes('zhipu')) return 'glm';
-  if (c.includes('claude') || c.includes('anthropic')) return 'claude';
-  return null;
-}
+// Delegated to lib/brand-detect.js (window.BrandDetect.detectBrand).
+// Server-side detectSpecificBrand in lib/rtk-metrics.js falls back to 'claude'
+// because RTK only records proxied commands.
+function detectBrand(cmd) { return BrandDetect.detectBrand(cmd); }
 
 // Run application!
 document.addEventListener('DOMContentLoaded', init);
