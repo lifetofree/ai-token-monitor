@@ -181,7 +181,10 @@ const server = http.createServer((req, res) => {
           } else {
             map[keyName] = sanitized;
           }
-          const newContent = ALLOWED_KEYS.filter(k => map[k] !== undefined).map(k => `${k}=${map[k]}`).join('\n') + '\n';
+          // Write back all keys from the file (not just the whitelist) so non-API
+          // keys like RTK_DB_PATH and FIREBASE_* are preserved across saves.
+          const allKeys = Object.keys(map);
+          const newContent = allKeys.map(k => `${k}=${map[k]}`).join('\n') + '\n';
           fs.writeFile(envPath, newContent, (writeErr) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             if (writeErr) {
@@ -207,16 +210,21 @@ const server = http.createServer((req, res) => {
       try {
         const keys = JSON.parse(body);
         const ALLOWED_KEYS = ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GLM_API_KEY', 'MINIMAX_API_KEY'];
-        let envContent = '';
+        const envPath = path.join(STATIC_ROOT, '.env');
+        const existing = (() => { try { return fs.readFileSync(envPath, 'utf8'); } catch (e) { return ''; } })();
+        const map = {};
+        existing.split('\n').forEach(line => {
+          const idx = line.indexOf('=');
+          if (idx > 0) map[line.substring(0, idx).trim()] = line.substring(idx + 1);
+        });
         ALLOWED_KEYS.forEach(k => {
           if (keys[k] && typeof keys[k] === 'string') {
-            // Strip newlines to prevent .env injection
-            const sanitized = keys[k].replace(/[\r\n]/g, '');
-            envContent += `${k}=${sanitized}\n`;
+            map[k] = keys[k].replace(/[\r\n]/g, '');
           }
         });
+        const envContent = Object.keys(map).map(k => `${k}=${map[k]}`).join('\n') + '\n';
 
-        fs.writeFile(path.join(STATIC_ROOT, '.env'), envContent, (err) => {
+        fs.writeFile(envPath, envContent, (err) => {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           if (err) {
             res.end(JSON.stringify({ success: false, error: err.message }));
@@ -1272,7 +1280,7 @@ function fetchMinimaxQuota(apiKey) {
         // Identify a separate weekly window if the response exposes one.
         let weeklyEntry = null;
         if (entries.length > 1) {
-          weeklyEntry = entries.find(e => e !== primary && isWeeklyEntry(e, fiveH_MS, sevenD_MS)) || null;
+          weeklyEntry = entries.find(e => e !== primary && isWeeklyEntry(e, sevenD_MS)) || null;
         }
         if (!weeklyEntry && primary && primary.end_time && primary.start_time) {
           const startMs = toEpochMs(primary.start_time);
@@ -1336,7 +1344,7 @@ function toEpochMs(v) {
   return isNaN(parsed) ? null : parsed;
 }
 
-function isWeeklyEntry(entry, fiveH_MS, sevenD_MS) {
+function isWeeklyEntry(entry, sevenD_MS) {
   const startMs = toEpochMs(entry.start_time);
   const endMs = toEpochMs(entry.end_time);
   if (!startMs || !endMs) return false;

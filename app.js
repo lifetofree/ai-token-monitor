@@ -115,9 +115,6 @@ function initElements() {
     valSimulationSpeed: document.getElementById('val-simulation-speed'),
 
     // Control buttons
-    toggleSimBtn: document.getElementById('toggle-sim-btn'),
-    simStatusIcon: document.getElementById('sim-status-icon'),
-    simStatusText: document.getElementById('sim-status-text'),
     openSettingsModalBtn: document.getElementById('open-settings-modal-btn'),
     clearLogsBtn: document.getElementById('clear-logs-btn'),
     exportCsvBtn: document.getElementById('export-csv-btn'),
@@ -167,7 +164,8 @@ function init() {
   startCountdownTimer();
 
   if (elements.simActivityDot) elements.simActivityDot.className = 'status-indicator';
-  if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring real RTK database';
+  if (elements.valSimulationSpeed) elements.valSimulationSpeed.textContent = 'Monitoring RTK database';
+  state.isAutoSimulating = false;
   fetchRealRTKData(true);
   connectRTKStream();
   stampLastUpdated();
@@ -779,22 +777,6 @@ function setupEventListeners() {
     logEvent('SYSTEM', `UI visual theme toggled to ${nextTheme} mode.`);
   });
   
-  // Simulation Control Button
-  if (elements.toggleSimBtn) elements.toggleSimBtn.addEventListener('click', () => {
-    state.isAutoSimulating = !state.isAutoSimulating;
-    localStorage.setItem('atm_auto_sim', state.isAutoSimulating);
-    
-    updateSimButtonUI(state.isAutoSimulating);
-    
-    if (state.isAutoSimulating) {
-      logEvent('SYSTEM', 'Auto-simulation runner resumes.');
-      scheduleNextSimulation();
-    } else {
-      logEvent('SYSTEM', 'Auto-simulation runner paused.');
-      if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
-    }
-  });
-
   // Clear Logs — clears both sim and real data stores
   if (elements.clearLogsBtn) elements.clearLogsBtn.addEventListener('click', () => {
     if (confirm('Are you sure you want to reset all token tracking usage logs? This clears LocalStorage.')) {

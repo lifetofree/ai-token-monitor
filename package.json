@@ -2,7 +2,7 @@
   "name": "ai-token-monitor",
   "version": "1.0.0",
   "description": "Real-Time Multi-Brand AI Token Monitor Dashboard",
-  "main": "index.html",
+  "main": "server.js",
   "scripts": {
     "dev": "node server.js",
     "check": "node --check server.js && node --check app.js",
