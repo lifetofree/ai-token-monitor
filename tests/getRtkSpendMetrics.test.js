@@ -5,15 +5,15 @@
 
 import { describe, it, expect } from 'vitest';
 
-// Mirror of detectBrand from server.js
-function detectBrand(cmd) {
-  if (!cmd || typeof cmd !== 'string') return null;
+// Mirror of detectSpecificBrand from server.js (claude fallback, not null).
+// Unmatched commands are Claude Code tool calls intercepted by the RTK proxy.
+function detectSpecificBrand(cmd) {
+  if (!cmd || typeof cmd !== 'string') return 'claude';
   const c = cmd.toLowerCase();
-  if (c.includes('claude') || c.includes('anthropic')) return 'claude';
   if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
-  if (c.includes('glm') || c.includes('zhipu')) return 'glm';
   if (c.includes('minimax')) return 'minimax';
-  return null;
+  if (c.includes('glm') || c.includes('zhipu')) return 'glm';
+  return 'claude';
 }
 
 // Mirror of the core aggregation logic inside getRtkSpendMetrics
@@ -36,15 +36,16 @@ function processRtkRows(rows, now) {
   };
 
   rows.forEach(row => {
-    const brandKey = detectBrand(row.original_cmd);
-    if (!brandKey || !metrics[brandKey]) return;
+    const brandKey = detectSpecificBrand(row.original_cmd);
+    if (!metrics[brandKey]) return;
 
     const reqTime = new Date(row.timestamp).getTime();
-    const inputTokens = parseInt(row.input_tokens || 0, 10);
-    const outputTokens = parseInt(row.output_tokens || 0, 10);
+    const inputTok  = parseInt(row.input_tokens  || 0, 10);
+    const outputTok = parseInt(row.output_tokens || 0, 10);
+    if (inputTok === 0 && outputTok === 0) return; // shell commands — no billing
 
     const brandRates = rates[brandKey];
-    const cost = ((inputTokens * brandRates.inputCost) + (outputTokens * brandRates.outputCost)) / 1000000;
+    const cost = ((inputTok * brandRates.inputCost) + (outputTok * brandRates.outputCost)) / 1000000;
 
     // Weekly accumulation
     metrics[brandKey].requestsWeekly++;
@@ -150,17 +151,20 @@ describe('getRtkSpendMetrics aggregation logic', () => {
     expect(res.gemini.earliestWeeklyTimestamp).toBe(Date.parse(t3));
   });
 
-  it('ignores shell commands and does not accumulate metrics', () => {
+  it('excludes 0-token rows (shell commands) from request counts', () => {
+    // detectSpecificBrand maps ls/git to 'claude' — the 0-token guard must
+    // prevent them from inflating the Claude request count.
     const rows = [
-      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'ls -la', input_tokens: 100, output_tokens: 100 },
-      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'git commit -m "msg"', input_tokens: 200, output_tokens: 200 }
+      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'ls -la',            input_tokens: 0,   output_tokens: 0   },
+      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'git commit -m "x"', input_tokens: 0,   output_tokens: 0   },
+      { timestamp: '2026-06-09T09:00:00.000Z', original_cmd: 'curl https://api.anthropic.com/v1/messages', input_tokens: 500, output_tokens: 200 }
     ];
 
     const res = processRtkRows(rows, NOW);
 
-    Object.keys(res).forEach(brand => {
-      expect(res[brand].requestsWeekly).toBe(0);
-      expect(res[brand].costWeekly).toBe(0);
-    });
+    // Only the real API call should count — shell commands (0 tokens) are excluded.
+    expect(res.claude.requestsWeekly).toBe(1);
+    expect(res.claude.requests5h).toBe(1);
+    expect(res.claude.costWeekly).toBeGreaterThan(0);
   });
 });

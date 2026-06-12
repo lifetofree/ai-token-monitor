@@ -886,10 +886,14 @@ function getRtkSpendMetrics() {
         // Commands that don't match Gemini/MiniMax/GLM patterns are Claude tool
         // calls (Claude Code shell interceptions). This stays correct when multiple
         // providers are active (e.g. after `rtk init --gemini`).
+        // Brand detection for RTK spend metrics. Falls back to 'claude' (not null)
+        // because unmatched RTK commands are typically Claude Code tool calls without
+        // an explicit 'anthropic' marker. See also detectBrand() in app.js which
+        // returns null for unmatched to filter non-LLM commands from the feed.
         function detectSpecificBrand(cmd) {
           if (!cmd || typeof cmd !== 'string') return 'claude'; // unmatched = Claude
           const c = cmd.toLowerCase();
-          if (c.includes('gemini-proxy:') || c.includes('generativelanguage.googleapis.com') || c.includes('google-generative')) return 'gemini';
+          if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
           if (c.includes('minimax')) return 'minimax';
           if (c.includes('glm') || c.includes('zhipu')) return 'glm';
           return 'claude'; // everything else is a Claude Code tool call
@@ -905,16 +909,20 @@ function getRtkSpendMetrics() {
           const age = now - ts;
           if (age < 0) return;
 
-          const cost = ((row.input_tokens * meta.inputCost) + (row.output_tokens * meta.outputCost)) / 1000000;
+          const inputTok  = row.input_tokens  || 0;
+          const outputTok = row.output_tokens || 0;
+          if (inputTok === 0 && outputTok === 0) return; // shell commands — no billing
+
+          const cost = ((inputTok * meta.inputCost) + (outputTok * meta.outputCost)) / 1000000;
           const s = spend[brandKey];
 
           if (age <= limit5h) {
             s.cost5h += cost;
             s.requests5h++;
-            s.input5h += row.input_tokens || 0;
-            s.output5h += row.output_tokens || 0;
+            s.input5h += inputTok;
+            s.output5h += outputTok;
             s.savedTokens5h += row.saved_tokens || 0;
-            s.tokens5h += (row.input_tokens || 0) + (row.output_tokens || 0);
+            s.tokens5h += inputTok + outputTok;
             if (s.earliest5hTimestamp === null || ts < s.earliest5hTimestamp) {
               s.earliest5hTimestamp = ts;
             }
@@ -923,10 +931,10 @@ function getRtkSpendMetrics() {
           if (age <= limitWk) {
             s.costWeekly += cost;
             s.requestsWeekly++;
-            s.inputWeekly += row.input_tokens || 0;
-            s.outputWeekly += row.output_tokens || 0;
+            s.inputWeekly += inputTok;
+            s.outputWeekly += outputTok;
             s.savedTokensWeekly += row.saved_tokens || 0;
-            s.tokensWeekly += (row.input_tokens || 0) + (row.output_tokens || 0);
+            s.tokensWeekly += inputTok + outputTok;
             if (s.earliestWeeklyTimestamp === null || ts < s.earliestWeeklyTimestamp) {
               s.earliestWeeklyTimestamp = ts;
             }

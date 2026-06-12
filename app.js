@@ -1283,13 +1283,19 @@ function connectRTKStream() {
   };
 }
 
+// Brand detection for RTK `original_cmd` strings. Returns null for shell
+// commands (git, ls, curl to localhost, etc.) so callers can skip them.
+// See also detectSpecificBrand() in server.js — same patterns but falls back
+// to 'claude' (not null) because in the RTK context unmatched commands are
+// typically Claude Code tool calls without an explicit 'anthropic' marker.
 function detectBrand(cmd) {
+  if (!cmd || typeof cmd !== 'string') return null;
   const c = cmd.toLowerCase();
   if (c.includes('gemini') || c.includes('google-generative') || c.includes('genai')) return 'gemini';
   if (c.includes('minimax')) return 'minimax';
   if (c.includes('glm') || c.includes('zhipu')) return 'glm';
   if (c.includes('claude') || c.includes('anthropic')) return 'claude';
-  return 'claude';
+  return null;
 }
 
 // Run application!

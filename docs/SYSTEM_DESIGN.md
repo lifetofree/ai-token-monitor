@@ -21,11 +21,11 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 
 ```
 .
-├── app.js                  # All client logic (~1,200 lines)
+├── app.js                  # All client logic (~1,296 lines)
 ├── index.html              # Static markup
 ├── styles.css              # Design system
-├── server.js               # Node server (~750 lines)
-├── package.json            # Zero dependencies
+├── server.js               # Node server (~1,405 lines)
+├── package.json            # devDependency: vitest
 ├── favicon.svg             # Static asset (whitelisted)
 ├── .env                    # User API keys (gitignored)
 ├── .env.example            # Template
@@ -33,6 +33,21 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 ├── CONTEXT.md              # Domain language
 ├── STATUS.md               # Project status snapshot
 ├── README.md               # Project overview and Known Gaps
+├── lib/
+│   └── antigravity-parser.js  # Parses Antigravity CLI transcript .jsonl files
+├── tests/
+│   ├── antigravityParser.test.js
+│   ├── computeApiUsedPct.test.js
+│   ├── cost.test.js
+│   ├── csv.test.js
+│   ├── detectBrand.test.js
+│   ├── escapeHtml.test.js
+│   ├── fetchGeminiQuota.test.js
+│   ├── fetchMinimaxQuota.test.js
+│   ├── format.test.js
+│   ├── getRtkSpendMetrics.test.js
+│   ├── reset5hFallback.test.js
+│   └── rollingLogFilter.test.js
 ├── docs/
 │   ├── BUSINESS_GOALS.md
 │   ├── REQUIREMENTS.md
@@ -50,14 +65,14 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 └── .ai.agents/             # Role rules (see *.md)
 ```
 
-There is no `src/`, no `tests/`, no `dist/`. The single-file-per-layer structure is intentional given the project's small surface area.
+There is no `src/` or `dist/`. The single-file-per-layer structure is intentional given the project's small surface area.
 
 ### Server-side SQLite caches (in `~/Library/Application Support/rtk/history.db`)
 
 | Table | Owner | Purpose | Migrations |
 |---|---|---|---|
 | `commands` | RTK (read-only) | The raw RTK history. The dashboard never writes to it. | n/a |
-| `brand_quota` | dashboard | Provider-quota snapshot per Brand. Idempotent `ALTER TABLE` migrations for `reset_at_weekly` and `weekly_remaining`. | `ADD COLUMN reset_at_weekly INTEGER`, `ADD COLUMN weekly_remaining INTEGER` |
+| `brand_quota` | dashboard | Provider-quota snapshot per Brand. Idempotent `ALTER TABLE` migrations. | `ADD COLUMN reset_at_weekly INTEGER`, `ADD COLUMN weekly_remaining INTEGER`, `ADD COLUMN window_started_at INTEGER` |
 | `parse_failures` | RTK (read-only) | RTK's own failure log; not consumed by the dashboard. | n/a |
 
 ## 3. Data model
@@ -78,7 +93,7 @@ interface BrandMetadata {
 
 `Brand.color` is **derived** from CSS custom properties (`--color-<brand>`) at render time. Single source of truth: `styles.css`. JS reads via `getComputedStyle`.
 
-The Brand `antigravity` is removed (see `../docs/adr/0001-drop-antigravity-brand.md`). The fields `meta.limit` and `meta.windowLabel` are still present in `DEFAULT_BRAND_METADATA` in `app.js`; deletion is tracked in `../docs/REVIEWS.md` R3 (see `../docs/adr/0004-fixed-rolling-windows.md`).
+The Brand `antigravity` is removed (see `../docs/adr/0001-drop-antigravity-brand.md`). The dead fields `meta.limit` and `meta.windowLabel` were removed from `DEFAULT_BRAND_METADATA` in Phase 2 (tracked in `../docs/REVIEWS.md` R3, `../docs/adr/0004-fixed-rolling-windows.md`).
 
 ### 3.2 Request
 
@@ -189,7 +204,7 @@ Missing keys are returned as `""`. The full key is never sent to the browser.
 
 Writes a single key to `.env`. **Allowed `KEY_NAME` values**: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`. Any other value returns 400.
 
-**Known bug** (tracked in `../docs/REVIEWS.md` R3): the writer reconstructs `.env` from the four-key whitelist only, dropping any other keys the user has added — including `RTK_DB_PATH`, which Real RTK mode honours via `process.env`.
+Both writers (`POST /api/env/key` and `POST /api/env`) read the existing `.env` first, merge only the allowed keys, and write back the full map — preserving non-whitelisted keys such as `RTK_DB_PATH` and `FIREBASE_*`. Fixed in Phase 1 (was tracked in `../docs/REVIEWS.md` R3).
 
 ### 4.3 `POST /api/env`
 
@@ -449,8 +464,6 @@ seedBrandQuotas(force) (server-side, every 30s via dashboard tick)
 ## 8. Known design gaps (from `../STATUS.md`)
 
 - **Cache model audit on pre-populated history**: the disjoint model is now applied across all four write paths, but `SIM_HISTORY_PRELOAD` rows pre-dating the migration may still look inconsistent (Reviewer R5 scope).
-- **Dead fields in `DEFAULT_BRAND_METADATA`**: `meta.limit` and `meta.windowLabel` are still in the schema. Tracked in `../docs/adr/0004-fixed-rolling-windows.md` and `../docs/REVIEWS.md` R3.
-- **Env-var loss**: per-key writer drops `.env` keys outside the four-key whitelist. This now **also affects Real RTK mode** (`RTK_DB_PATH` is dropped). Tracked in `../docs/REVIEWS.md` R3.
 - **MiniMax fetcher reliance on undocumented field names**: `current_interval_remaining_percent`, `weekly_end_time`, etc. are inferred from the wire response, not a public spec. A future MiniMax API change could silently break the fetcher.
 - **`brand_quota` cache can serve 1-hour-stale data** if the provider is unreachable at the moment the reset window elapses. There is no out-of-band staleness signal.
 - **Single-store history**: `localStorage` is the only client-side persistence. A server restart loses Request history (only the brand_quota cache survives).
