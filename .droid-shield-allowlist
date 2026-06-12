@@ -1,0 +1,25 @@
+# .droid-shield-allowlist
+# Droid-Shield pre-push secret scanner — false-positive suppressions.
+#
+# Each line is a pattern (substring or regex) that the scanner should
+# ignore when evaluating potential secret leaks. Only add patterns that
+# have been confirmed to be benign by a code reviewer.
+#
+# Context: TL-9 (PLAN_IMPROVEMENT.md Phase 5)
+# The scanner incorrectly flags the following as secret tokens:
+#   • `tokens5h`  — a variable name in server.js / app.js / lib/rtk-metrics.js
+#   • `tokens`    — generic JS identifiers in the codebase
+#   • bare `0`    — default numeric values flagged as "token = 0"
+#
+# The false-positive logic is: the scanner treats any value that looks like
+# a random-length alphanumeric string after "token" (including variable
+# suffixes like "5h", "Weekly") as a credential. These are not credentials.
+
+# Allowlisted false-positive patterns
+tokens5h
+tokensWeekly
+savedTokens
+inputTokens
+outputTokens
+cachedTokens
+totalTokens
