@@ -575,6 +575,7 @@ async function seedBrandQuotas(force) {
   }
 
   const env = loadEnv();
+  const rtkSpend = await getRtkSpendMetrics();
   const results = [];
 
   for (const brand of Object.keys(BRAND_FETCHERS)) {
@@ -602,7 +603,7 @@ async function seedBrandQuotas(force) {
       };
     } else {
       try {
-        const fetched = await config.fetch(apiKey);
+        const fetched = await config.fetch(apiKey, rtkSpend);
         // 5h-window observation: if the API returned a usable 5h signal
         // (remaining or limit_value is a number), record when we first saw
         // THIS window's contents. If the signal looks consistent with the
@@ -683,7 +684,7 @@ async function seedBrandQuotas(force) {
   }
 
   // Push to Firebase for ESP32 companion — await so the PUT completes before returning.
-  await publishToFirebase(results).catch(e => console.error('[firebase]', e?.message));
+  await publishToFirebase(results, env, rtkSpend).catch(e => console.error('[firebase]', e?.message));
 
   return { cached: false, results, forced: force };
 }
@@ -694,8 +695,7 @@ async function seedBrandQuotas(force) {
 //                   reset_at_weekly, error, seeded_at, spend_pct5h,
 //                   spend_pct_weekly, spend_reqs5h, spend_reqs_wk,
 //                   tokens5h, cost5h, tokens_wk, cost_wk
-async function publishToFirebase(results) {
-  const env    = loadEnv();
+async function publishToFirebase(results, env, allSpend) {
   const dbUrl  = env.FIREBASE_URL  || env.FIREBASE_DB_URL  || process.env.FIREBASE_URL  || process.env.FIREBASE_DB_URL;
   const secret = env.FIREBASE_AUTH || env.FIREBASE_DB_SECRET || process.env.FIREBASE_AUTH || process.env.FIREBASE_DB_SECRET;
   if (!dbUrl || !secret) return;
@@ -707,8 +707,6 @@ async function publishToFirebase(results) {
     minimax: { limit5h: 2.00,  limitWeekly: 15.00 },
     glm:     { limit5h: 0.80,  limitWeekly:  6.00 },
   };
-
-  const allSpend = await getRtkSpendMetrics();
   const agentUsage = await new Promise((resolve) => {
     const now = Date.now();
     const fiveHoursAgo = now - 5 * 60 * 60 * 1000;
@@ -845,7 +843,7 @@ async function publishToFirebase(results) {
 
 function getRtkSpendMetrics() {
   return new Promise((resolve) => {
-    const query = `SELECT timestamp, original_cmd, input_tokens, output_tokens, saved_tokens FROM commands ORDER BY id ASC`;
+    const query = `SELECT timestamp, original_cmd, input_tokens, output_tokens, saved_tokens FROM commands WHERE timestamp >= datetime('now', '-7 days') ORDER BY id ASC`;
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       if (error || !stdout.trim()) {
         resolve({});
@@ -916,7 +914,7 @@ function getRtkSpendMetrics() {
             s.input5h += row.input_tokens || 0;
             s.output5h += row.output_tokens || 0;
             s.savedTokens5h += row.saved_tokens || 0;
-            s.tokens5h += (row.input_tokens || 0) + (row.output_tokens || 0) + (row.saved_tokens || 0);
+            s.tokens5h += (row.input_tokens || 0) + (row.output_tokens || 0);
             if (s.earliest5hTimestamp === null || ts < s.earliest5hTimestamp) {
               s.earliest5hTimestamp = ts;
             }
@@ -928,7 +926,7 @@ function getRtkSpendMetrics() {
             s.inputWeekly += row.input_tokens || 0;
             s.outputWeekly += row.output_tokens || 0;
             s.savedTokensWeekly += row.saved_tokens || 0;
-            s.tokensWeekly += (row.input_tokens || 0) + (row.output_tokens || 0) + (row.saved_tokens || 0);
+            s.tokensWeekly += (row.input_tokens || 0) + (row.output_tokens || 0);
             if (s.earliestWeeklyTimestamp === null || ts < s.earliestWeeklyTimestamp) {
               s.earliestWeeklyTimestamp = ts;
             }
@@ -951,10 +949,11 @@ function getRtkSpendMetrics() {
   });
 }
 
-function fetchClaudeQuota(apiKey) {
-  // Run the Anthropic API probe (for per-minute token bucket headers) and the
-  // RTK DB aggregation in parallel. RTK stats are stored in raw_json so the
-  // dashboard card gets Claude usage data even when the API key has zero credit.
+function fetchClaudeQuota(apiKey, rtkSpend) {
+  // Run the Anthropic API probe (for per-minute token bucket headers).
+  // RTK stats are passed in from the caller (already fetched once per cycle)
+  // and stored in raw_json so the dashboard card gets usage data even when
+  // the API key has zero credit.
   const apiPromise = new Promise((resolve) => {
     const postData = JSON.stringify({
       model: 'claude-3-haiku-20240307',
@@ -1021,11 +1020,10 @@ function fetchClaudeQuota(apiKey) {
     req.end();
   });
 
-  return Promise.all([apiPromise, getRtkSpendMetrics()])
-    .then(([apiResult, allSpend]) => {
-      const rtkClaude = allSpend && allSpend.claude ? allSpend.claude : null;
-      return { ...apiResult, raw_json: rtkClaude };
-    });
+  return apiPromise.then(apiResult => {
+    const rtkClaude = rtkSpend && rtkSpend.claude ? rtkSpend.claude : null;
+    return { ...apiResult, raw_json: rtkClaude };
+  });
 }
 
 function fetchGeminiQuota(apiKey) {
@@ -1090,12 +1088,11 @@ function fetchGeminiQuota(apiKey) {
   });
 }
 
-function fetchGLMQuota(apiKey) {
+function fetchGLMQuota(apiKey, rtkSpend) {
   // Uses the Zhipu AI quota monitoring API to get 5-hour token limits
   // with remaining %, used/total tokens, and reset time.
-  // Also fetches RTK spend metrics so the dashboard can show cost,
-  // token counts, and reset times from the RTK database alongside
-  // the percentage-based quota API data.
+  // RTK spend metrics are passed in from the caller (fetched once per cycle)
+  // so the dashboard can show cost and token counts alongside API quota data.
   const apiPromise = new Promise((resolve) => {
     const req = https.request({
       hostname: 'bigmodel.cn',
@@ -1198,11 +1195,10 @@ function fetchGLMQuota(apiKey) {
     req.end();
   });
 
-  return Promise.all([apiPromise, getRtkSpendMetrics()])
-    .then(([apiResult, allSpend]) => {
-      const rtkGlm = allSpend && allSpend.glm ? allSpend.glm : null;
-      return { ...apiResult, rtk_spend: rtkGlm };
-    });
+  return apiPromise.then(apiResult => {
+    const rtkGlm = rtkSpend && rtkSpend.glm ? rtkSpend.glm : null;
+    return { ...apiResult, rtk_spend: rtkGlm };
+  });
 }
 
 function fetchMinimaxQuota(apiKey) {

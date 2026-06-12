@@ -21,10 +21,10 @@ function getBrandColor(key) {
 const FALLBACK_BRAND_COLOR = '#94a3b8';
 
 const DEFAULT_BRAND_METADATA = {
-  gemini: { name: 'Antigravity', inputCost: 1.25, outputCost: 5.00, color: 'var(--color-gemini)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
-  claude: { name: 'Claude', inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)', limit: 100.00, limit5h: 5.00, limitWeekly: 30.00, windowLabel: '5-Hour' },
-  minimax: { name: 'Minimax', inputCost: 1.00, outputCost: 4.00, color: 'var(--color-minimax)', limit: 50.00, limit5h: 2.00, limitWeekly: 15.00, windowLabel: '5-Hour' },
-  glm: { name: 'GLM', inputCost: 0.50, outputCost: 2.00, color: 'var(--color-glm)', limit: 20.00, limit5h: 0.80, limitWeekly: 6.00, windowLabel: '5-Hour' }
+  gemini:  { name: 'Antigravity', inputCost: 1.25, outputCost: 5.00,  color: 'var(--color-gemini)',  limit5h: 2.00, limitWeekly: 15.00 },
+  claude:  { name: 'Claude',      inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)',  limit5h: 5.00, limitWeekly: 30.00 },
+  minimax: { name: 'Minimax',     inputCost: 1.00, outputCost: 4.00,  color: 'var(--color-minimax)', limit5h: 2.00, limitWeekly: 15.00 },
+  glm:     { name: 'GLM',         inputCost: 0.50, outputCost: 2.00,  color: 'var(--color-glm)',     limit5h: 0.80, limitWeekly:  6.00 }
 };
 
 // State variables
@@ -32,6 +32,7 @@ let state = {
   brandMetadata: JSON.parse(localStorage.getItem('atm_brand_metadata')) || JSON.parse(JSON.stringify(DEFAULT_BRAND_METADATA)),
   requests: JSON.parse(localStorage.getItem('atm_requests')) || [],
   realCommands: [],
+  monitorMode: 'real',
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
   currentSort: { key: 'brand', direction: 'asc' },
@@ -296,12 +297,8 @@ function renderBrandCards(brandData) {
   Object.keys(brandData).forEach(bKey => {
     const data = brandData[bKey];
     const meta = state.brandMetadata[bKey];
-    const totalTokens = data.inputTokens + data.outputTokens;
-
     const limit5h = meta.limit5h > 0 ? meta.limit5h : 2.00;
     const limitWeekly = meta.limitWeekly > 0 ? meta.limitWeekly : 15.00;
-    const windowLabel = meta.windowLabel || '5-Hour';
-
     const pct5h = Math.min(100, (data.cost5h / limit5h) * 100);
     const pctWeekly = Math.min(100, (data.costWeekly / limitWeekly) * 100);
 
@@ -317,7 +314,9 @@ function renderBrandCards(brandData) {
     // When the provider exposes a real quota-reset timestamp via /api/seed-quotas
     // (state.brandQuotas), prefer that — it's the authoritative window boundary.
     const apiQuota = (state.brandQuotas && state.brandQuotas[bKey]) || null;
+    // Skip per_minute reset_at for the 5h row — it's a ~60s window boundary, not 5h.
     const apiReset5hMs = apiQuota && apiQuota.reset_at && apiQuota.reset_at > now
+      && apiQuota.unit !== 'per_minute'
       ? apiQuota.reset_at - now : null;
     const apiResetWeeklyMs = apiQuota && apiQuota.reset_at_weekly && apiQuota.reset_at_weekly > now
       ? apiQuota.reset_at_weekly - now : null;
@@ -331,13 +330,10 @@ function renderBrandCards(brandData) {
       : null;
 
     // Drive the progress bar from the provider's API quota when available.
-    // For 'per_minute' (Claude): show the token bucket data when it's present
-    // (remaining + limit_value are numbers), otherwise mark as unavailable.
+    // For 'per_minute' (Claude): the API exposes a per-minute token bucket, not
+    // a 5h window. Skip API-driven bar/reset for the 5h row so RTK rolling data
+    // is always used for Claude's 5h bar and reset countdown.
     const isPerMinute = apiQuota && apiQuota.unit === 'per_minute';
-    const perMinuteHasData = isPerMinute
-      && typeof apiQuota.remaining === 'number'
-      && typeof apiQuota.limit_value === 'number'
-      && apiQuota.limit_value > 0;
     const apiUsedPct5h = computeApiUsedPct(apiQuota, '5h');
     const apiUsedPctWeekly = computeApiUsedPct(apiQuota, 'weekly');
 
@@ -452,7 +448,7 @@ function renderBrandCards(brandData) {
         <!-- 5-Hour rolling limit -->
         <div class="rolling-limit-row">
           <div class="rolling-limit-row-header">
-            <span class="rolling-limit-title">${escapeHtml(windowLabel)}</span>
+            <span class="rolling-limit-title">5-Hour</span>
             <span class="rolling-limit-amounts">${amounts5h}</span>
             <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${barPct5h.toFixed(0)}%</span>
           </div>
@@ -486,7 +482,9 @@ function computeApiUsedPct(apiQuota, scope) {
     if (apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number') {
       return Math.max(0, Math.min(100, 100 - apiQuota.remaining));
     }
-    if ((apiQuota.unit === 'requests' || apiQuota.unit === 'per_minute')
+    // 'per_minute' exposes a per-minute token bucket, not a 5h window — skip it
+    // here so the 5h bar always uses RTK rolling spend data for such brands.
+    if (apiQuota.unit === 'requests'
         && typeof apiQuota.remaining === 'number'
         && typeof apiQuota.limit_value === 'number'
         && apiQuota.limit_value > 0) {
@@ -1119,41 +1117,8 @@ function fetchAgentUsage() {
     });
 }
 
-function triggerSilentQuotaSync(brandKey) {
-  if (!state.syncingBrands) state.syncingBrands = {};
-  if (state.syncingBrands[brandKey]) return;
-  state.syncingBrands[brandKey] = true;
-
-  fetch('/api/seed-quotas', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force: true })
-  })
-    .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
-    .then(data => {
-      state.syncingBrands[brandKey] = false;
-      if (data.success && data.results) {
-        if (!state.brandQuotas) state.brandQuotas = {};
-        data.results.forEach(q => {
-          if (typeof q.raw_json === 'string') {
-            try { q.raw_json = JSON.parse(q.raw_json); } catch(e) { /* keep as-is */ }
-          }
-          state.brandQuotas[q.brand] = q;
-        });
-        calculateAndRenderDashboard();
-      }
-    })
-    .catch(err => {
-      state.syncingBrands[brandKey] = false;
-      console.warn(`Silent quota sync failed for ${brandKey}:`, err);
-    });
-}
-
 function getActiveRequests() {
-  return state.realCommands;
+  return state.monitorMode === 'sim' ? state.requests : state.realCommands;
 }
 
 let lastSeenCommandId = 0;
@@ -1192,7 +1157,7 @@ function fetchRealRTKData(forceRefresh = false) {
       const recentLogThreshold = isInitialLoad ? Math.max(0, llmCount - 15) : 0;
       let llmSeen = 0;
 
-      sortedCmds.forEach((cmd, idx) => {
+      sortedCmds.forEach((cmd) => {
         const brandKey = detectBrand(cmd.original_cmd);
         if (!brandKey) return; // Skip non-LLM proxy commands
         llmSeen++;
@@ -1204,6 +1169,7 @@ function fetchRealRTKData(forceRefresh = false) {
 
         mappedRequests.push({
           id: 'rtk_' + cmd.id,
+          source: 'real',
           timestamp: new Date(cmd.timestamp).getTime(),
           brand: brandKey,
           inputTokens: cmd.input_tokens,
@@ -1274,6 +1240,7 @@ function connectRTKStream() {
 
       const newReq = {
         id: 'rtk_' + cmd.id,
+        source: 'real',
         timestamp: new Date(cmd.timestamp).getTime(),
         brand: brandKey,
         inputTokens: cmd.input_tokens,
