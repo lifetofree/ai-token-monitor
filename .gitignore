@@ -33,7 +33,10 @@ coverage/
 
 .claude/
 firmware/esp32-display/secrets.h
+firmware/esp32-display/secrets.txt
 
 # Local SQLite databases (server state, regenerable)
 monitor.db
 *.db
+
+firmware/esp32-display/esp32-display copy.txt
