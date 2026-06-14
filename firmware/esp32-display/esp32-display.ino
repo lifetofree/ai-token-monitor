@@ -34,7 +34,7 @@
   #define WIFI_PASSWORD WIFI_PASS
 #endif
 
-#define DEMO_MODE false
+// Demo mode removed — loading screen is shown until first Firebase fetch succeeds
 
 // =====================================================================
 // Colors (RGB565) — match web dashboard dark mode (styles.css :root[data-theme=dark])
@@ -89,6 +89,19 @@ bool useFirebase = false;
 // ตัวแปรจับเวลาอัปเดตข้อมูลบนคลาวด์แบบ Global เพื่อความถูกต้องของระบบ
 unsigned long lastRefresh = 0;
 
+// ─── Display Mode ───────────────────────────────────────────────────
+#define MODE_MANUAL    0
+#define MODE_AUTO      1
+#define AUTO_INTERVAL  5000   // ms between auto page swaps
+
+int displayMode = MODE_MANUAL;      // current display mode
+bool dataFetched = false;           // true after first successful Firebase fetch
+unsigned long lastAutoSwap = 0;     // timer for auto-swap
+
+// ─── Button Long-Press Detection ───────────────────────────────────
+unsigned long buttonPressStart = 0;
+bool buttonLongFired = false;
+
 // =====================================================================
 // 🚀 ฟังก์ชันช่วยเหลือทางระบบ (System Utility Functions)
 // =====================================================================
@@ -136,14 +149,6 @@ long long getJsonInt64(FirebaseJson &json, const String &path) {
 
 // WiFi signal bars at top-right corner
 void drawWiFiSignal(int x, int y) {
-  if (DEMO_MODE) {
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_TXT_MUTED);
-    tft.setCursor(x - 24, y);
-    tft.print("DEMO");
-    return;
-  }
-  
   if (WiFi.status() == WL_CONNECTED) {
     long rssi = WiFi.RSSI();
     int bars = 1;
@@ -394,7 +399,7 @@ void drawUnifiedCard(int index) {
   // 10. Footer hint (y=262)
   tft.setTextSize(1);
   tft.setTextColor(COLOR_TXT_MUTED);
-  const char* hint = "[press button to swap]";
+  const char* hint = (displayMode == MODE_AUTO) ? "[auto] [hold 3s=manual]" : "[press] [hold 3s=auto]";  
   int hintW = strlen(hint) * CHAR_W_SIZE1;
   tft.setCursor((SCREEN_WIDTH - hintW) / 2, CARD_Y + CARD_H - 12);
   tft.print(hint);
@@ -406,10 +411,58 @@ void drawStackedDualUI(int index) {
 }
 
 // =====================================================================
+// 🔃 Loading Screen & Mode Toast
+// =====================================================================
+
+// แสดงหน้าจอโหลดขณะรอข้อมูลจาก Firebase (ก่อน dataFetched == true)
+void drawLoadingScreen() {
+  tft.fillScreen(COLOR_DARK_BG);
+  tft.fillRoundRect(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_RADIUS, COLOR_CARD_BG);
+  // Header bar
+  tft.fillRoundRect(CARD_X, CARD_Y, CARD_W, ACCENT_H, CARD_RADIUS, COLOR_BORDER);
+  tft.fillRect(CARD_X, CARD_Y + ACCENT_H / 2, CARD_W, ACCENT_H / 2, COLOR_BORDER);
+  tft.setTextColor(COLOR_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(CONTENT_X, CARD_Y + (ACCENT_H - 16) / 2);
+  tft.print("AI Monitor");
+  drawWiFiSignal(CARD_X + CARD_W - 20, CARD_Y + (ACCENT_H - 12) / 2);
+  // Loading text
+  tft.setTextSize(2);
+  tft.setTextColor(COLOR_TXT_MUTED);
+  tft.setCursor(50, 120);
+  tft.print("Loading...");
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_TXT_MUTED);
+  tft.setCursor(30, 152);
+  tft.print("Fetching token data...");
+  tft.setCursor(30, 167);
+  tft.print("Please wait");
+}
+
+// แสดง Toast 1 วินาทีแจ้งโหมดที่เปลี่ยนไปหลังกดค้าง 3 วินาที
+void drawModeToast() {
+  tft.fillRect(0, 0, SCREEN_WIDTH, 28, COLOR_CARD_BG);
+  tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_BORDER);
+  tft.setTextSize(1);
+  tft.setCursor(10, 10);
+  if (displayMode == MODE_AUTO) {
+    tft.setTextColor(BRAND_GEMINI);
+    tft.print("AUTO MODE  ");
+    tft.setTextColor(COLOR_TXT_MUTED);
+    tft.print("(swap every 5s)");
+  } else {
+    tft.setTextColor(BRAND_CLAUDE);
+    tft.print("MANUAL MODE  ");
+    tft.setTextColor(COLOR_TXT_MUTED);
+    tft.print("(press to swap)");
+  }
+  delay(1000);
+}
+
+// =====================================================================
 // 📡 ฟังก์ชันสำหรับตรวจสอบและกู้คืน WiFi อัตโนมัติ (Auto-Reconnect)
 // =====================================================================
 void handleWiFiAutoReconnect() {
-  if (DEMO_MODE) return;
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WIFI] สัญญาณขาดหาย! กำลังพยายามกู้คืนและเชื่อมต่อใหม่...");
     WiFi.disconnect();
@@ -469,31 +522,20 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   Serial.println("[BOOT] Switched inputs configured.");
   
-  // สตาร์ทค่าตัวแปรจำลองเริ่มต้น — ใช้ percent mode (total=100) ให้ตรงกับ payload
-  // ที่ web app (lib/firebase.js) เผยแพร่ เพื่อให้ค่าบนจอตรงกับเว็บแดชบอร์ดเสมอ
-  // แม้ตอนที่ยังไม่ได้ข้อมูลจริงจาก Firebase (เช่น WiFi หลุด)
-  aiData[0] = {"Antigravity", BRAND_GEMINI, {12LL, 100LL, 88LL, 0LL}, {8LL,  100LL, 92LL, 0LL}};
-  aiData[1] = {"Claude",     BRAND_CLAUDE,  {38LL, 100LL, 62LL, 0LL}, {30LL, 100LL, 70LL, 0LL}};
-  aiData[2] = {"MiniMax",    BRAND_MINIMAX, {4LL,  100LL, 96LL, 0LL}, {3LL,  100LL, 97LL, 0LL}};
-  aiData[3] = {"GLM",        BRAND_GLM,     {7LL,  100LL, 93LL, 0LL}, {6LL,  100LL, 94LL, 0LL}};
+  // Init aiData with brand info only; quota data zeroed until first Firebase fetch
+  aiData[0] = {"Antigravity", BRAND_GEMINI, {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
+  aiData[1] = {"Claude",     BRAND_CLAUDE,  {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
+  aiData[2] = {"MiniMax",    BRAND_MINIMAX, {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
+  aiData[3] = {"GLM",        BRAND_GLM,     {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
 
-  // ตั้ง reset_at ให้ทุกแบรนด์เสมอ (ทั้ง DEMO_MODE และโหมด Firebase ที่ยังเชื่อมต่อไม่สำเร็จ)
-  // เพื่อให้ส่วน "Reset in 2h 14m" แสดงผลได้แม้อยู่ในโหมดสาธิต/ออฟไลน์
-  time_t baseTime = time(nullptr);
-  if (baseTime < 1000000000L) baseTime = 1716940000L;  // fallback เมื่อ NTP ยังไม่ sync
-  for (int i = 0; i < 4; i++) {
-    aiData[i].quota5h.reset_at     = baseTime + 5 * 3600;        // +5h
-    aiData[i].quotaWeekly.reset_at = baseTime + 6 * 86400 + 12 * 3600;  // +6d 12h
+  // Show loading screen while connecting to WiFi & fetching data
+  drawLoadingScreen();
+
+  useFirebase = initFirebase();
+  if (useFirebase) {
+    fetchTokensFromFirebase();  // immediate first fetch on boot
   }
 
-  if (DEMO_MODE) {
-    useFirebase = false;
-  } else {
-    useFirebase = initFirebase();
-  }
-  
-  displayQuota(currentIndex);
-  
   // บันทึกเวลาเมื่อบูตเสร็จสิ้น เพื่อไม่ให้ลูปดึงข้อมูลทำงานจนกว่าจะครบ 30 วินาทีถัดไป
   lastRefresh = millis();
   Serial.println("[BOOT] Setup successfully completed.");
@@ -608,40 +650,75 @@ void publishSelectedIndex(int idx) {
 void loop() {
   bool buttonState = digitalRead(BUTTON_PIN);
   unsigned long now = millis();
-  
-  // ระบบป้องกันแรงกระเพื่อมสัญญาณปุ่มกดสับหน้าจอ (Debounce)
-  if (buttonState != lastButtonState && now - lastDebounce > DEBOUNCE_MS) {
-    if (buttonState == LOW) {
-      currentIndex = (currentIndex + 1) % num_ai; 
-      if (useFirebase) {
-        publishSelectedIndex(currentIndex);
-      }
-      displayQuota(currentIndex);
+
+  // ─── Button State Machine ────────────────────────────────────────────
+  // Detect press start (HIGH → LOW)
+  if (buttonState == LOW && lastButtonState == HIGH) {
+    if (now - lastDebounce > DEBOUNCE_MS) {
+      buttonPressStart = now;
+      buttonLongFired = false;
     }
     lastDebounce = now;
   }
+
+  // Detect long press while held (≥ 3000ms, fires once) → toggle Manual/Auto mode
+  if (buttonState == LOW && !buttonLongFired) {
+    if (now - buttonPressStart >= 3000) {
+      buttonLongFired = true;
+      displayMode = (displayMode == MODE_MANUAL) ? MODE_AUTO : MODE_MANUAL;
+      lastAutoSwap = now;
+      drawModeToast();
+      if (dataFetched) displayQuota(currentIndex);
+      else drawLoadingScreen();
+    }
+  }
+
+  // Detect release (LOW → HIGH) — short press → advance page
+  if (buttonState == HIGH && lastButtonState == LOW) {
+    if (now - lastDebounce > DEBOUNCE_MS) {
+      if (!buttonLongFired && dataFetched) {
+        currentIndex = (currentIndex + 1) % num_ai;
+        if (useFirebase) publishSelectedIndex(currentIndex);
+        displayQuota(currentIndex);
+        if (displayMode == MODE_AUTO) lastAutoSwap = now; // reset auto timer
+      }
+    }
+    lastDebounce = now;
+  }
+
   lastButtonState = buttonState;
-  
-  // สแกนตรวจสอบอัปเดตสถิติคลาวด์เบื้องหลังแบบไม่รบกวนการรีเฟรชหลักของแอป
+
+  // ─── Auto-Advance Pages (MODE_AUTO only) ────────────────────────────
+  if (displayMode == MODE_AUTO && dataFetched) {
+    if (now - lastAutoSwap >= AUTO_INTERVAL) {
+      lastAutoSwap = now;
+      currentIndex = (currentIndex + 1) % num_ai;
+      if (useFirebase) publishSelectedIndex(currentIndex);
+      displayQuota(currentIndex);
+    }
+  }
+
+  // ─── Cloud Refresh (every 30s) ───────────────────────────────────────
   if (now - lastRefresh >= 30000) {
     lastRefresh = now;
     if (useFirebase) {
-      // เชื่อมต่ออยู่: ตรวจ WiFi + ดึงข้อมูลใหม่
       if (WiFi.status() == WL_CONNECTED) {
         fetchTokensFromFirebase();
       } else {
         Serial.println("[LOOP] WiFi dropped, marking offline");
         useFirebase = false;
-        displayQuota(currentIndex);
+        if (dataFetched) displayQuota(currentIndex);
+        else drawLoadingScreen();
       }
-    } else if (!DEMO_MODE) {
-      // ยังไม่เคยเชื่อมต่อสำเร็จ: ลองเชื่อมใหม่ทุก 30s เพื่อให้ฟื้นตัวอัตโนมัติ
-      Serial.println("[LOOP] Attempting WiFi/Firebase reconnect...");
-      useFirebase = initFirebase();  // จะโชว์ "WiFi Connected!" / "WiFi Failed!" บนจอชั่วคราว
-      displayQuota(currentIndex);
     } else {
-      // DEMO_MODE: แค่วาดใหม่เพื่อให้เวลารีเซ็ตเดิน
-      displayQuota(currentIndex);
+      // Not connected: retry WiFi/Firebase every 30s
+      Serial.println("[LOOP] Attempting WiFi/Firebase reconnect...");
+      useFirebase = initFirebase();
+      if (useFirebase) {
+        fetchTokensFromFirebase();
+      } else if (!dataFetched) {
+        drawLoadingScreen();
+      }
     }
   }
 }
@@ -659,7 +736,7 @@ void displayQuota(int index) {
 // ใช้ HTTPClient REST โดยตรงเพราะ FirebaseESP32 library ไม่อนุญาตให้ path มี "."
 // URL pattern: https://<host>/<path>.json?auth=<token>
 void fetchTokensFromFirebase() {
-  if (DEMO_MODE || !useFirebase) return;
+  if (!useFirebase) return;
   
   Serial.println("[FIREBASE] GET /display/quotas via REST...");
   
@@ -764,6 +841,7 @@ void fetchTokensFromFirebase() {
   Serial.print((long)aiData[0].quota5h.remaining);
   Serial.print("% | Weekly: ");
   Serial.println((long)aiData[0].quotaWeekly.remaining);
-  
+
+  dataFetched = true;         // unlock display after first successful fetch
   displayQuota(currentIndex);
 }
