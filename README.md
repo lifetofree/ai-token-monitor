@@ -1,6 +1,6 @@
 # AI Token Monitor
 
-A real-time token monitor dashboard for **Antigravity** (Gemini CLI), **Claude**, **GLM**, and **MiniMax** — combining a **local rolling-spend view** of LLM traffic with **live provider-quota awareness** (5-hour and weekly caps, reset times, used %) on top of it. Includes a **mirrored ESP32 OLED companion display** that reads the same state from a Firebase Realtime Database `display.json` node and renders one brand per page on a 128×64 SSD1306.
+A real-time token monitor dashboard for **Antigravity** (Gemini CLI), **Claude**, **GLM**, and **MiniMax** — combining a **local rolling-spend view** of LLM traffic with **live provider-quota awareness** (5-hour and weekly caps, reset times, used %) on top of it. Includes a **mirrored ESP32 color-TFT companion display** that reads the same state from a Firebase Realtime Database `display.json` node and renders one brand per page on a 240×280 ST7789.
 
 This is a local, lightweight tool for personal development environments — to keep operations within both vendor-imposed and self-imposed budgets. v1 is **dual-monitor**: **Real RTK Monitor** (default, reads live commands from the RTK SQLite DB and surfaces new ones via SSE) and an **in-app Simulation** mode for offline development and demos.
 
@@ -14,7 +14,7 @@ This is a local, lightweight tool for personal development environments — to k
 - **Node.js** v14+ (the workflow CI uses Node 20)
 - **`sqlite3` CLI** on `PATH` (used by the server to read the RTK history DB and the `brand_quota` / `agent_usage` cache tables)
 - *(Optional)* An RTK-style proxy that writes commands to `~/Library/Application Support/rtk/history.db` — the dashboard reads this file when in Real mode
-- *(Optional, for the ESP32 companion)* an ESP32 + SSD1306 0.96" OLED, Arduino IDE with the ESP32 board package, and a Firebase Realtime Database (see [`firmware/esp32-display/esp32-display.ino`](./firmware/esp32-display/esp32-display.ino))
+- *(Optional, for the ESP32 companion)* an ESP32 + ST7789 1.69" 240×280 color TFT, Arduino IDE with the ESP32 board package and Adafruit_ST7789 / Adafruit_GFX / FirebaseESP32 libraries, and a Firebase Realtime Database (see [`firmware/esp32-display/esp32-display.ino`](./firmware/esp32-display/esp32-display.ino))
 
 ### Running locally
 ```bash
@@ -29,19 +29,21 @@ To point the Real RTK reader at a non-default DB, set the `RTK_DB_PATH` env var 
 RTK_DB_PATH=/path/to/custom/history.db node server.js
 ```
 
-To enable the ESP32 companion mirror, set `FIREBASE_URL` (or `FIREBASE_DB_URL`) and `FIREBASE_AUTH` (or `FIREBASE_DB_SECRET`) in `.env`. The server PUTs a sanitized snapshot to `<FIREBASE_URL>/display.json?auth=<FIREBASE_AUTH>` after every `seedBrandQuotas()` pass. Without these, the dashboard still works; only the OLED mirror is skipped.
+To enable the ESP32 companion mirror, set `FIREBASE_URL` (or `FIREBASE_DB_URL`) and `FIREBASE_AUTH` (or `FIREBASE_DB_SECRET`) in `.env`. The server PUTs a sanitized snapshot to `<FIREBASE_URL>/display.json?auth=<FIREBASE_AUTH>` after every `seedBrandQuotas()` pass. Without these, the dashboard still works; only the color-TFT mirror is skipped.
 
 ### Running the test suite
 ```bash
 npm install    # first time only
-npm test       # runs vitest run (12 files, 86 tests, ~300ms)
+npm test       # runs vitest run (15 files, 102 tests, ~500ms)
 npm run check  # node --check on server.js and app.js
 ```
 
 ### Flashing the ESP32 companion
-1. Copy `firmware/esp32-display/secrets.h` (gitignored) and fill in `WIFI_SSID`, `WIFI_PASS`, `FIREBASE_HOST`, `FIREBASE_PATH`, `FIREBASE_AUTH`.
-2. In Arduino IDE: open the `.ino`, select **Tools → Board → ESP32 Dev Module**, **Upload Speed → 115200** (CH340 clones drop bytes at 921600).
-3. Hold the **BOOT** button, click **Upload**, release BOOT when the `Connecting...` line appears. See the OLED layout in the firmware header comment.
+1. Copy `firmware/esp32-display/secrets.txt` → `firmware/esp32-display/secrets.h` (gitignored) and fill in `WIFI_SSID`, `WIFI_PASS`, `FIREBASE_HOST`, `FIREBASE_AUTH`.
+2. Install Arduino libraries: **Adafruit ST7789**, **Adafruit GFX**, **FirebaseESP32** (mobizt).
+3. In Arduino IDE: open `esp32-display.ino`, select **Tools → Board → ESP32 Dev Module**, **Upload Speed → 115200** (CH340 clones drop bytes at 921600).
+4. Hold the **BOOT** button, click **Upload**, release BOOT when `Connecting...` appears.
+5. The display shows a "Connecting WiFi" animation until first Firebase fetch, then switches to the brand card.
 
 ---
 
@@ -88,20 +90,28 @@ Coding-agent sessions (Antigravity CLI in particular) record input / output / ca
 
 The parser lives in [`lib/antigravity-parser.js`](./lib/antigravity-parser.js) and is unit-tested in `tests/antigravityParser.test.js` (4 cases). Token estimation uses the standard `~4 chars / token` heuristic for the textual parts of the transcript; the parser never modifies the source files.
 
-### 5. ESP32 OLED Companion Display
-A separate Arduino sketch (`firmware/esp32-display/esp32-display.ino`) renders a one-brand-at-a-time summary on a 128×64 SSD1306:
-- Button on GPIO 12: **short press** cycles pages (one page per brand), **long press** toggles auto-rotate (6 s/page).
-- Layout per page (font 6×8, line height 9 px, bar 7 px):
-  - `y= 0` Brand name + `[i/N]`
-  - `y= 9` Window label (`5h Rolling` / `5-Hour` / `Weekly`) + used %
-  - `y=18` **Countdown to reset** (left, e.g. `2h 14m`) + **absolute reset clock** (right, e.g. `18:42`)
-  - `y=27` Full-width progress bar
-  - `y=36` Weekly label + used %
-  - `y=45` Countdown (e.g. `4d 3h`) + day+time (e.g. `Sun 22:00`)
-  - `y=54` Full-width weekly bar
-- Polls the Firebase `display.json` node every 30 s; the server PUTs a sanitized payload after every `seedBrandQuotas()` pass.
-- Requires `syncNtp()` success for the absolute clock column; until then, the column shows `--:--` while the countdown still ticks. ESP32 is configured for **UTC+7 (Bangkok)** via `configTzTime("CST-7", ...)`.
-- The CH340-clone serial chip is sensitive at 921600 baud; **Upload Speed → 115200** in Arduino IDE is the highest-leverage setting to avoid `termios.error` / `StopIteration` failures.
+### 5. ESP32 Color-TFT Companion Display
+A separate Arduino sketch (`firmware/esp32-display/esp32-display.ino`) renders a full-color brand card on a **240×280 ST7789 TFT** (1.69"):
+- Button on **GPIO 25**: **short press** cycles brands (1/4 → 2/4 → …), **long press** toggles auto-rotate (5 s/page).
+- Each page is a **web-dashboard-style card** with:
+  - **Header stripe** in the brand's color (Indigo / Orange / Cyan / Green — matches `styles.css` dark-mode palette)
+  - **Brand name** + page indicator (`1/4`) + WiFi signal bars
+  - **5-HOUR QUOTA** section — large remaining %, animated progress bar, 3-column stat row (`Used% / Left% / Total%`), reset absolute time + countdown
+  - **WEEKLY QUOTA** section — same layout
+  - **Footer**: `[press pin 25 to swap]`
+- Brand colors match the web dashboard CSS dark-mode custom properties (RGB565 equivalents):
+
+  | Brand | Web `--color-*` (dark) | ESP32 RGB565 |
+  |-------|------------------------|-------------|
+  | Gemini (Antigravity) | `#6366f1` | `0x633E` |
+  | Claude | `#f97316` | `0xFB82` |
+  | MiniMax | `#22d3ee` | `0x269D` |
+  | GLM | `#4ade80` | `0x4EF0` |
+
+- Polls Firebase `/display.json/quotas` every 30 s; `lib/firebase.js` PUTs after every `seedBrandQuotas()` pass. Reset timestamps are written in **seconds** (converted from JS ms) so `time(nullptr)` comparisons are exact.
+- Progress bar % and reset times match the web dashboard: `spend_pct5h` / `spend_pct_weekly` for brands without a native token quota; provider `remaining` / `limit_value` for GLM and MiniMax; absolute time via NTP (UTC+7, Bangkok).
+- Requires NTP sync for the absolute clock column; until then, the column shows `--:--` while the relative countdown still ticks.
+- Upload at **115200 baud** — CH340 clone chips drop bytes at 921600.
 
 ### 6. Live Rolling Windows (sliding treadmill)
 Spend safety limits operate on a **sliding/rolling window** rather than calendar resets:
@@ -127,7 +137,7 @@ All `original_cmd` text goes through `escapeHtml` before insertion into the DOM 
 - **Authoritative Reset Times** — "Resets at HH:MM" badge prefers the provider's `reset_at` / `reset_at_weekly` over the local rolling estimate.
 - **Active Provider Selector** — dropdown in the header to tag all incoming RTK commands with the correct brand when switching between coding agents (Claude Code, Antigravity CLI, etc.). Persisted in `localStorage`.
 - **Agent Usage Tracking** — server-side aggregation of Antigravity CLI session transcripts into `agent_usage`, surfaced via `/api/agent-usage` with `total` / `5h` / `weekly` rollups.
-- **ESP32 OLED Companion** — separate Arduino sketch mirrors the dashboard state to a Firebase Realtime Database for an at-a-glance 128×64 display, with countdown + absolute reset clock per brand.
+- **ESP32 Color-TFT Companion** — Arduino sketch mirrors the dashboard state to Firebase for an at-a-glance 240×280 full-color card display; brand colors match the web dashboard's dark-mode palette; stats row shows Used%/Left%/Total%; reset times match the web via ms→s timestamp conversion in `lib/firebase.js`.
 - **Live Request Log Feed** — real-time SSE stream of new RTK commands; on initial load, surfaces the last 15 LLM-classified commands (shell noise filtered).
 - **Light / Dark Theme** — all form controls, dropdowns, and progress bars are theme-aware via CSS custom properties; custom SVG chevron in both modes; focus glow via `color-mix`.
 - **Compact API Tokens tab** — monospace labels at fixed 170px width, 12px font.
@@ -169,8 +179,18 @@ See [`docs/SYSTEM_DESIGN.md`](./docs/SYSTEM_DESIGN.md) for full contracts and [`
 ├── package.json             # dev / check / test / test:watch scripts
 ├── vitest.config.js         # Vitest config (node env)
 ├── lib/
-│   └── antigravity-parser.js# Agent transcript → token/cost stats
-├── tests/                   # Vitest suite (12 files, 86 tests)
+│   ├── antigravity-parser.js  # Agent transcript → token/cost stats
+│   ├── brand-detect.js        # detectBrand() — maps original_cmd to brand key
+│   ├── brand-fetchers.js      # HTTPS quota fetchers per brand (Claude/Gemini/GLM/MiniMax)
+│   ├── dom-utils.js           # escapeHtml (shared browser + test)
+│   ├── env.js                 # .env loader, masker, HTTP handlers
+│   ├── firebase.js            # publishToFirebase() — PUTs sanitized snapshot for ESP32
+│   ├── format.js              # formatCurrency, formatDuration, etc.
+│   ├── pricing-defaults.js    # UMD module: PRICING_DEFAULTS (shared server + browser)
+│   ├── quota-cache.js         # brand_quota SQLite table, TTL constants, cache helpers
+│   ├── rtk-metrics.js         # Server-side RTK DB spend aggregation
+│   └── sse-watcher.js         # SSE client registry + DB file watcher
+├── tests/                   # Vitest suite (15 files, 102 tests)
 │   ├── format.test.js
 │   ├── cost.test.js
 │   ├── detectBrand.test.js
@@ -182,11 +202,15 @@ See [`docs/SYSTEM_DESIGN.md`](./docs/SYSTEM_DESIGN.md) for full contracts and [`
 │   ├── antigravityParser.test.js
 │   ├── csv.test.js
 │   ├── escapeHtml.test.js
-│   └── rollingLogFilter.test.js
+│   ├── rollingLogFilter.test.js
+│   ├── envRoundTrip.test.js
+│   ├── modeSwitch.test.js
+│   └── pricingDefaults.test.js
 ├── firmware/
 │   └── esp32-display/       # ESP32 Arduino sketch + secrets.h (gitignored)
-│       ├── esp32-display.ino
-│       └── secrets.h
+│       ├── esp32-display.ino  # ST7789 240×280 color TFT, Firebase REST polling
+│       ├── secrets.txt        # Template — copy to secrets.h and fill credentials
+│       └── secrets.h          # gitignored
 ├── docs/
 │   ├── BUSINESS_GOALS.md
 │   ├── REQUIREMENTS.md
@@ -225,7 +249,7 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 | 📋 Product Manager (PM) | `docs/REQUIREMENTS.md`, `docs/USER_JOURNEY.md` | Complete — §2.8 Provider-Quota Tracking, AC-13..AC-16, dual-monitor journey |
 | ⚡ Technical Lead | `docs/TECH_STACK.md` | Complete — endpoint inventory, MiniMax HTTPS, server-side SQLite, outbound-network security baseline |
 | 🏗️ Architect | `docs/SYSTEM_DESIGN.md`, `docs/adr/0006-…` | Complete — 9 API contracts, dual-monitor data flow, defensive-parsing pattern, hardware-companion topology |
-| 💻 TDD Engineer | `tests/`, `lib/`, `vitest.config.js`, `package.json` | Complete — 12 test files, 86 tests; `lib/antigravity-parser.js` extracted as the first shared module; mirror-function approach documented per file |
+| 💻 TDD Engineer | `tests/`, `lib/`, `vitest.config.js`, `package.json` | Complete — 15 test files, 102 tests; `lib/` now has 11 shared modules; mirror-function approach documented per file |
 | 🕵️ Reviewer | `docs/REVIEWS.md` | Complete — R1, R2, R3, R4, R5 logged (8 ✅, 3 ⚠️, 0 ❌ in R5) |
 | 🚀 DevOps Engineer | `.github/workflows/ci.yml`, `Dockerfile`, `.dockerignore` | Complete — CI runs lint+test+boot smoke; container image is `node:20-slim` + system sqlite3 |
 
@@ -242,11 +266,13 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 9. **Mirror-function tests** — most of the vitest suite re-implements the canonical formulas from `app.js` / `server.js` because those files are browser/server scripts, not modules. `lib/antigravity-parser.js` is the first exception (the parser is imported in tests). Follow-up: extract `format*` / `cost*` / `detectBrand` / `computeApiUsedPct` into the same `lib/` tree. Tracked in `STATUS.md` and `docs/REVIEWS.md` R5.
 10. **ESP32 firmware not unit-tested** — the `.ino` is a single-file Arduino sketch; the only verification is flashing it. The NTP/formatter code would benefit from being pulled out into a host-runnable test (host-side mock of `WiFi` + `time()`).
 11. **Droid-Shield secret-scanner false positives** — the local pre-push hook flags `tokens5h` variable names and `0` default values as if they were tokens. Currently worked around with `git push --no-verify`. Tracked separately; not a real security issue.
+12. **ESP32 stats row shows % for Claude/Gemini** — when the provider's API doesn't expose a native token quota (Claude: per-minute bucket; Gemini: not exposed), the ESP32 stats row shows `Used%/Left%/Total%` derived from `spend_pct5h`. The web dashboard shows the same spend %; no mismatch, but absolute token counts are not surfaced on the display for these two brands.
 
 ### Recently Closed
 
-- **ESP32 OLED companion display** — separate Arduino sketch mirrors the dashboard to Firebase for an at-a-glance 128×64 view; one page per brand; countdown + absolute reset clock.
-- **Firebase publisher** — `publishToFirebase()` puts a sanitized snapshot to `display.json` after every `seedBrandQuotas()` pass; ESP32 polls it.
+- **ESP32 color-TFT companion display** — Arduino sketch mirrors the dashboard to Firebase; 240×280 ST7789 full-color card per brand; brand colors match web dark-mode palette; progress bar and stats row match web dashboard semantics; button short/long press for page cycling and auto-rotate.
+- **Firebase publisher** — `publishToFirebase()` puts a sanitized snapshot to `/display.json` after every `seedBrandQuotas()` pass; timestamps converted ms→s so ESP32 `time(nullptr)` comparisons are correct; ESP32 polls every 30 s.
+- **ESP32 timestamp fix** — `reset_at` / `reset_at_weekly` now written in seconds (÷1000 from JS epoch ms) so the firmware's `getResetString()` and `formatAbsoluteReset()` show correct countdowns and clock times instead of a 55,000-year future value.
 - **Agent usage tracking** — `lib/antigravity-parser.js` + `agent_usage` table + `GET /api/agent-usage` for `total` / `5h` / `weekly` rollups.
 - **RTK spend-driven Claude reset** — `reset_at` is overridden with the RTK earliest-5h timestamp so the badge matches the rolling window the bar is showing.
 - **GLM `window_started_at` fallback** — server-side column gives the 5h reset a stable boundary for brands whose API doesn't expose it.

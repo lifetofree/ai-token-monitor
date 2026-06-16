@@ -132,15 +132,39 @@ uint16_t getProgressBarColor(int percent) {
   return 0xF800;                    // สัญญาณพลังงานสีแดงขั้นวิกฤตใกล้หมดโควต้า
 }
 
-// ฟังก์ชันช่วยสกัดยอดตัวเลข 64-bit (long long) จากข้อมูลดิบ FirebaseJson เพื่อตัดปัญหาบั๊กถอดประเภทข้อมูลพลาด
+// ฟังก์ชันช่วยสกัดยอดตัวเลข 64-bit (long long) จากข้อมูลดิบ FirebaseJson
+// หมายเหตุ: FirebaseJson รายงานตัวเลขที่ > 2^31 (เช่น Unix timestamp ~1.75B)
+// ว่าเป็นประเภท "uint" ไม่ใช่ "int" — ต้องจัดการแยกต่างหาก
+// ใช้ stringValue เป็น fallback สากลเพื่อหลีกเลี่ยงปัญหา precision loss ของ double
 long long getJsonInt64(FirebaseJson &json, const String &path) {
   FirebaseJsonData jsonData;
   if (json.get(jsonData, path.c_str())) {
+    // "uint" — FirebaseJson uses this for values > 2,147,483,647 (e.g. Unix timestamps)
+    if (jsonData.type == "uint") {
+      // stringValue is the safest — avoids double precision loss on large ints
+      if (jsonData.stringValue.length() > 0) {
+        return strtoll(jsonData.stringValue.c_str(), NULL, 10);
+      }
+      // Cast through uint32_t first to correctly reconstruct the unsigned value
+      // (intValue is int32; a value like 3841186453 is stored as -453780843 due to overflow)
+      return (long long)(uint32_t)jsonData.intValue;
+    }
     if (jsonData.type == "int") {
+      // intValue is int32; large values (e.g. timestamps > 2^31) overflow to
+      // negative. Use stringValue as the reliable source, same as "uint" branch.
+      if (jsonData.stringValue.length() > 0) {
+        return strtoll(jsonData.stringValue.c_str(), NULL, 10);
+      }
       return (long long)jsonData.intValue;
-    } else if (jsonData.type == "double" || jsonData.type == "float") {
+    }
+    if (jsonData.type == "double" || jsonData.type == "float") {
+      // Use stringValue first if available to avoid floating-point truncation
+      if (jsonData.stringValue.length() > 0) {
+        return strtoll(jsonData.stringValue.c_str(), NULL, 10);
+      }
       return (long long)jsonData.doubleValue;
-    } else if (jsonData.type == "string") {
+    }
+    if (jsonData.type == "string") {
       return strtoll(jsonData.stringValue.c_str(), NULL, 10);
     }
   }
@@ -273,6 +297,10 @@ void drawQuotaSection(int yStart, const char* title, const QuotaDetails& q, bool
     ? formatAbsoluteResetWithDay(q.reset_at)
     : formatAbsoluteReset(q.reset_at);
 
+  // DEBUG: log reset row values to Serial Monitor
+  Serial.printf("[DRAW] %s | reset_at=%lld | resetY=%d | abs='%s' | cdown='%s'\n",
+                title, q.reset_at, yStart + 88, absoluteTime.c_str(), countdown.c_str());
+
   // แถว 1: ชื่อหมวด (size 1, muted)
   tft.setTextSize(1);
   tft.setTextColor(COLOR_TXT_MUTED);
@@ -399,7 +427,7 @@ void drawUnifiedCard(int index) {
   // 10. Footer hint (y=262)
   tft.setTextSize(1);
   tft.setTextColor(COLOR_TXT_MUTED);
-  const char* hint = (displayMode == MODE_AUTO) ? "[auto] [hold 3s=manual]" : "[press] [hold 3s=auto]";  
+  const char* hint = (displayMode == MODE_AUTO) ? "[ auto ] [ hold 3s = manual ]" : "[ press ] [ hold 3s = auto ]";  
   int hintW = strlen(hint) * CHAR_W_SIZE1;
   tft.setCursor((SCREEN_WIDTH - hintW) / 2, CARD_Y + CARD_H - 12);
   tft.print(hint);
@@ -691,7 +719,7 @@ void loop() {
   // ─── Auto-Advance Pages (MODE_AUTO only) ────────────────────────────
   if (displayMode == MODE_AUTO && dataFetched) {
     if (now - lastAutoSwap >= AUTO_INTERVAL) {
-      lastAutoSwap = now;
+      lastAutoSwap = millis();  // snapshot actual fire time, not stale 'now'
       currentIndex = (currentIndex + 1) % num_ai;
       if (useFirebase) publishSelectedIndex(currentIndex);
       displayQuota(currentIndex);
@@ -789,8 +817,47 @@ void fetchTokensFromFirebase() {
     long long remaining       = getJsonInt64(json, prefix + "remaining");
     long long limitValue      = getJsonInt64(json, prefix + "limit_value");
     long long weeklyRemaining = getJsonInt64(json, prefix + "weekly_remaining");
-    long long resetAt         = getJsonInt64(json, prefix + "reset_at");
-    long long resetAtWeekly   = getJsonInt64(json, prefix + "reset_at_weekly");
+    // DEBUG: log raw JSON type + value for reset_at fields
+    {
+      FirebaseJsonData dbg;
+      if (json.get(dbg, (prefix + "reset_at").c_str())) {
+        Serial.printf("[JSON] %sreset_at type='%s' int=%d dbl=%.0f str='%s'\n",
+                      prefix.c_str(), dbg.type.c_str(), dbg.intValue,
+                      dbg.doubleValue, dbg.stringValue.c_str());
+      } else {
+        Serial.printf("[JSON] %sreset_at NOT FOUND in JSON\n", prefix.c_str());
+      }
+      FirebaseJsonData dbg2;
+      if (json.get(dbg2, (prefix + "reset_at_weekly").c_str())) {
+        Serial.printf("[JSON] %sreset_at_weekly type='%s' int=%d dbl=%.0f str='%s'\n",
+                      prefix.c_str(), dbg2.type.c_str(), dbg2.intValue,
+                      dbg2.doubleValue, dbg2.stringValue.c_str());
+      }
+    }
+    long long resetAt       = getJsonInt64(json, prefix + "reset_at");
+    long long resetAtWeekly = getJsonInt64(json, prefix + "reset_at_weekly");
+
+    // Validate reset_at: always reject negative values (int32 overflow garbage).
+    // Only apply the "too far in future" guard when NTP is synced — if time() hasn't
+    // synced yet it returns seconds-since-boot (~45s), and using that as 'now' would
+    // make every valid 2025 timestamp look >90 days in the future and reject it.
+    {
+      if (resetAt       < 0) resetAt       = 0;
+      if (resetAtWeekly < 0) resetAtWeekly = 0;
+      // Auto-convert ms→s: server may publish either unit. Values > 10^11
+      // (year 5138 in seconds) are definitely milliseconds.
+      if (resetAt       > 100000000000LL) resetAt       /= 1000;
+      if (resetAtWeekly > 100000000000LL) resetAtWeekly /= 1000;
+      time_t ntp = time(nullptr);
+      if (ntp > 1000000000L) {
+        long long now_ll    = (long long)ntp;
+        long long maxFuture = now_ll + 90LL * 86400;  // 90 days from now
+        if (resetAt       > maxFuture) resetAt       = 0;
+        if (resetAtWeekly > maxFuture) resetAtWeekly = 0;
+      }
+    }
+    Serial.printf("[FETCH] %s: reset_at=%lld reset_at_weekly=%lld\n",
+                  aiKeys[i].c_str(), resetAt, resetAtWeekly);
     long long spendPct5h      = getJsonInt64(json, prefix + "spend_pct5h");
     long long spendPctWk      = getJsonInt64(json, prefix + "spend_pct_weekly");
     long long tokens5h        = getJsonInt64(json, prefix + "tokens5h");
@@ -844,4 +911,5 @@ void fetchTokensFromFirebase() {
 
   dataFetched = true;         // unlock display after first successful fetch
   displayQuota(currentIndex);
+  if (displayMode == MODE_AUTO) lastAutoSwap = millis(); // don't let cloud refresh trigger instant extra swap
 }
