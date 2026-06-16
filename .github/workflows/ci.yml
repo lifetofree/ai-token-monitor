@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Syntax check (server + app + lib)
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: sqlite3 availability probe
+        run: sqlite3 --version
+
+      - name: Server boot + endpoint smoke
+        run: |
+          node server.js &
+          SERVER_PID=$!
+          sleep 3
+          curl -sf http://localhost:3000/ > /dev/null
+          curl -sf http://localhost:3000/api/seed-quotas > /dev/null
+          kill $SERVER_PID

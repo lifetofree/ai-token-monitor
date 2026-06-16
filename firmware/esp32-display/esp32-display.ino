@@ -902,6 +902,14 @@ void fetchTokensFromFirebase() {
       aiData[i].quotaWeekly.used = spendPctWk;
     }
     aiData[i].quotaWeekly.reset_at = resetAtWeekly;
+
+    // DEBUG: show exactly what the card will display for this brand
+    int pct5h = calcRemainingPct(aiData[i].quota5h);
+    int pctWk = calcRemainingPct(aiData[i].quotaWeekly);
+    Serial.printf("[CALC] %-10s unit=%-12s | 5h:  rem=%lld tot=%lld pct=%d%% | wk: rem=%lld tot=%lld pct=%d%%\n",
+                  aiKeys[i].c_str(), unit.c_str(),
+                  aiData[i].quota5h.remaining,   aiData[i].quota5h.total,   pct5h,
+                  aiData[i].quotaWeekly.remaining, aiData[i].quotaWeekly.total, pctWk);
   }
   
   Serial.print("[DEBUG] Sync OK! Antigravity 5H: ");

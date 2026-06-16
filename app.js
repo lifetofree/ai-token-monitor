@@ -326,8 +326,8 @@ function renderBrandCards(brandData) {
     const meta = state.brandMetadata[bKey];
     const limit5h = meta.limit5h > 0 ? meta.limit5h : 2.00;
     const limitWeekly = meta.limitWeekly > 0 ? meta.limitWeekly : 15.00;
-    const pct5h = Math.min(100, (data.cost5h / limit5h) * 100);
-    const pctWeekly = Math.min(100, (data.costWeekly / limitWeekly) * 100);
+    const pct5h = QuotaUtils.calcSpendPct(data.cost5h, limit5h);
+    const pctWeekly = QuotaUtils.calcSpendPct(data.costWeekly, limitWeekly);
 
     const getLimitStyle = (pct) => {
       if (pct >= ROLLING_LIMIT_DANGER_PCT) return { class: ' limit-danger', color: 'var(--danger)' };
@@ -361,8 +361,8 @@ function renderBrandCards(brandData) {
     // a 5h window. Skip API-driven bar/reset for the 5h row so RTK rolling data
     // is always used for Claude's 5h bar and reset countdown.
     const isPerMinute = apiQuota && apiQuota.unit === 'per_minute';
-    const apiUsedPct5h = computeApiUsedPct(apiQuota, '5h');
-    const apiUsedPctWeekly = computeApiUsedPct(apiQuota, 'weekly');
+    const apiUsedPct5h = QuotaUtils.computeApiUsedPct(apiQuota, '5h');
+    const apiUsedPctWeekly = QuotaUtils.computeApiUsedPct(apiQuota, 'weekly');
 
     // RTK spend data: server embeds RTK metrics in raw_json._rtk_spend (GLM)
     // or uses raw_json directly as RTK spend (Claude). Used for cost-based bar
@@ -399,8 +399,8 @@ function renderBrandCards(brandData) {
       return null;
     })();
 
-    const rtkPct5h     = rtkSpend && limit5h > 0    ? Math.min(100, (rtkSpend.cost5h     / limit5h)     * 100) : null;
-    const rtkPctWeekly = rtkSpend && limitWeekly > 0 ? Math.min(100, (rtkSpend.costWeekly / limitWeekly) * 100) : null;
+    const rtkPct5h     = rtkSpend && limit5h > 0     ? QuotaUtils.calcSpendPct(rtkSpend.cost5h,     limit5h)     : null;
+    const rtkPctWeekly = rtkSpend && limitWeekly > 0 ? QuotaUtils.calcSpendPct(rtkSpend.costWeekly, limitWeekly) : null;
 
     const barPct5h     = apiUsedPct5h     !== null ? apiUsedPct5h     : (rtkPct5h     !== null ? rtkPct5h     : pct5h);
     const barPctWeekly = apiUsedPctWeekly !== null ? apiUsedPctWeekly : (rtkPctWeekly !== null ? rtkPctWeekly : pctWeekly);
@@ -461,10 +461,27 @@ function renderBrandCards(brandData) {
         ? `${formatCompactNumber(rtkSpend ? rtkSpend.tokensWeekly : data.tokensWeekly)} tokens · ${formatCurrency(rtkSpend ? rtkSpend.costWeekly : data.costWeekly)}`
         : `${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}`;
 
+    // Format a percentage for display: values between 0 and 1 show as "<1%"
+    // instead of rounding to "0%" when there is real non-zero spend.
+    const fmtPct = (pct) => (pct > 0 && pct < 1) ? '<1' : pct.toFixed(0);
+
+    // Budget-exhaustion forecast — only shown when barPct > 20% (enough burn
+    // history) and the projection falls inside the current window.
+    const forecastMs5h = barPct5h > 20
+      ? QuotaUtils.calcForecast(data.cost5h, limit5h, data.earliest5hTimestamp, reset5hMs, now)
+      : null;
+    const forecastMs_wk = barPctWeekly > 20
+      ? QuotaUtils.calcForecast(data.costWeekly, limitWeekly, data.earliestWeeklyTimestamp, resetWeeklyMs, now)
+      : null;
+    const fmtForecast = (ms) => ms
+      ? new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : null;
+    const forecast5hLabel    = fmtForecast(forecastMs5h);
+    const forecastWeeklyLabel = fmtForecast(forecastMs_wk);
+
     const card = document.createElement('div');
     card.className = 'card brand-card';
     card.style.setProperty('--brand-color', getBrandColor(bKey));
-
 
     card.innerHTML = `
       <div class="brand-card-header">
@@ -478,12 +495,13 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">5-Hour</span>
             <span class="rolling-limit-amounts">${amounts5h}</span>
-            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${barPct5h.toFixed(0)}%</span>
+            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${fmtPct(barPct5h)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSource5h))}">
             <div class="brand-limit-fill${style5h.class}" style="width: ${barPct5h}%;"></div>
           </div>
           <span class="reset-badge${style5h.class}" title="${escapeHtml(reset5hTooltip)}">&#x23F1; ${reset5hLabel}</span>
+          ${forecast5hLabel ? `<span class="forecast-badge" title="At current burn rate, 5h budget exhausted around ${forecast5hLabel}">⚡ exhausted ~${forecast5hLabel}</span>` : ''}
         </div>
 
         <!-- Weekly rolling limit -->
@@ -491,44 +509,19 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">Weekly</span>
             <span class="rolling-limit-amounts">${amountsWeekly}</span>
-            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${barPctWeekly.toFixed(0)}%</span>
+            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${fmtPct(barPctWeekly)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSourceWeekly))}">
             <div class="brand-limit-fill${styleWeekly.class}" style="width: ${barPctWeekly}%;"></div>
           </div>
           <span class="reset-badge${styleWeekly.class}" title="${escapeHtml(resetWeeklyTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
+          ${forecastWeeklyLabel ? `<span class="forecast-badge" title="At current burn rate, weekly budget exhausted around ${forecastWeeklyLabel}">⚡ exhausted ~${forecastWeeklyLabel}</span>` : ''}
         </div>
       </div>
     `;
     elements.brandCardsContainer.appendChild(card);
   });
 }
-
-function computeApiUsedPct(apiQuota, scope) {
-  if (!apiQuota) return null;
-  if (scope === '5h') {
-    if (apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number') {
-      return Math.max(0, Math.min(100, 100 - apiQuota.remaining));
-    }
-    // 'per_minute' exposes a per-minute token bucket, not a 5h window — skip it
-    // here so the 5h bar always uses RTK rolling spend data for such brands.
-    if (apiQuota.unit === 'requests'
-        && typeof apiQuota.remaining === 'number'
-        && typeof apiQuota.limit_value === 'number'
-        && apiQuota.limit_value > 0) {
-      return Math.max(0, Math.min(100, ((apiQuota.limit_value - apiQuota.remaining) / apiQuota.limit_value) * 100));
-    }
-    return null;
-  }
-  if (scope === 'weekly') {
-    if (typeof apiQuota.weekly_remaining !== 'number') return null;
-    // Weekly is always reported as percent by the providers we integrate with.
-    return Math.max(0, Math.min(100, 100 - apiQuota.weekly_remaining));
-  }
-  return null;
-}
-
-
 
 function renderTable(brandData) {
   elements.tableBody.innerHTML = '';

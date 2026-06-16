@@ -311,3 +311,203 @@ const QUOTA_TTL_MS_SLOW = 3_600_000;    // reset-exposing providers (Claude, GLM
 15. **PO-2** — Add `/api/diagnostics` endpoint.
 16. **PO-3 / PM-6** — Author AC-17..AC-20 in `REQUIREMENTS.md` for the ESP32 companion.
 17. **TL-9** — Add the Droid-Shield allowlist entry.
+
+---
+
+## 8. Revision — 2026-06-16
+
+> Roles: All seven (full-team brainstorm)
+> Scope: Post-Phase-4 state review + ESP32 ST7789 upgrade + new R6 items
+
+### 8.1 Items closed since 2026-06-12
+
+The following items from Phases 1–5 are confirmed closed in the current codebase:
+
+| ID | Item | Evidence |
+|---|---|---|
+| TL-1 | `node --check` covers `lib/` | `package.json` check script updated; 15 test files pass |
+| TL-2 | Single pricing source of truth | `lib/pricing-defaults.js` exists (UMD); `lib/rtk-metrics.js` and `app.js` both consume it |
+| TL-3 | `httpsRequest` timeout | `lib/brand-fetchers.js` `httpsRequest` now calls `req.setTimeout(8000, …)` |
+| TL-4 | `server.js` module split | `lib/env.js`, `lib/quota-cache.js`, `lib/sse-watcher.js` all exist; `server.js` is ~413 lines |
+| TL-7 | Dead MiniMax field aliases trimmed | `extractRemaining` list reduced; `console.warn` on unknowns |
+| TL-8 | `detectBrand` comment fixed | Unified `lib/brand-detect.js`; comment corrected; Vitest added |
+| TL-9 | Droid-Shield allowlist | `.droid-shield-allowlist` committed |
+| TL-10 | Quota TTL constants hoisted | `lib/quota-cache.js` exports `QUOTA_TTL_MS_FAST` / `QUOTA_TTL_MS_SLOW` |
+| PO-1 | Simulation mode switcher | `<select id="monitor-mode-select">` in header; `state.monitorMode` wired; `localStorage` persisted |
+| PM-3 | AC for env-var sibling preservation | `tests/envRoundTrip.test.js` added; `REQUIREMENTS.md` updated |
+| TL-6 | SSE render coalescing | Render coalescer landed (`lib/sse-watcher.js` + `app.js`) |
+
+**Test suite grew from 12 files / 86 tests → 15 files / 102 tests.** New files: `envRoundTrip.test.js`, `modeSwitch.test.js`, `pricingDefaults.test.js`.
+
+**`lib/` now has 11 modules.** Phase 3 (TL-4) is complete.
+
+---
+
+### 8.2 Still open from prior plan
+
+| ID | Item | Status |
+|---|---|---|
+| TL-5 | `app.js` split (1,302 lines) | Still open — `computeApiUsedPct`, render helpers, state not yet extracted |
+| PM-2 | AC-12 expanded | Partial — mode switcher works but reload/switch/feed ACs not all documented |
+| PM-4 | `USER_JOURNEY.md` stale on removed modal | Still open |
+| PM-5 | Monthly aggregates documented as out of scope | Still open |
+| PO-2 | `/api/diagnostics` endpoint | Not started |
+| PO-3 / PM-6 | ESP32 AC block in `REQUIREMENTS.md` | Not started |
+
+---
+
+### 8.3 New items from R6 brainstorm
+
+#### R6-DO-1 — CI pipeline is deleted (P0 — critical)
+
+**File:** `.github/workflows/ci.yml` — shows `D` (deleted) in `git status`.
+
+Every push to `dev` currently has zero automated guard. All 15 test files and `node --check` run only locally. One bad push can land broken code silently.
+
+**Action:** Restore `.github/workflows/ci.yml`. Minimum viable content matches the prior pipeline: Node 20, `npm install`, `npm run check`, `npm test`, `sqlite3` boot probe, `GET /api/seed-quotas` smoke.
+
+---
+
+#### R6-DO-2 — Server binds to `0.0.0.0` instead of `127.0.0.1` (P2)
+
+**File:** `server.js:246` `server.listen(PORT, () => { … })`
+
+Node's default bind is `0.0.0.0`, meaning the dashboard is reachable on all interfaces. The CORS allowlist stops cross-origin reads but the port is still open for LAN access. The README and `STATUS.md` both acknowledge "personal tool, loopback-only." The bind should enforce it.
+
+**Action:** Change to `server.listen(PORT, '127.0.0.1', () => { … })`. One token change; no tests.
+
+---
+
+#### R6-DO-3 — No uncaught-exception handler (P2)
+
+**File:** `server.js` (top of file)
+
+If `execFile('sqlite3', …)` throws synchronously or the `firebaseData` call crashes, the server process dies silently. There is no `process.on('uncaughtException')` or `process.on('unhandledRejection')`.
+
+**Action:** Add at the top of `server.js`:
+```js
+process.on('uncaughtException',  (e) => console.error('[FATAL]', e));
+process.on('unhandledRejection', (e) => console.error('[UNHANDLED]', e));
+```
+Both handlers log and keep the process alive for a personal tool. No restart strategy needed at this posture.
+
+---
+
+#### R6-A-1 — `computeApiUsedPct` is untestable (embedded in `app.js`) (P1)
+
+**File:** `app.js` ~L364
+
+`computeApiUsedPct(apiQuota, window)` is the single most important business-logic function in the client: it decides whether the brand card bar reads from `remaining/limit_value`, `spend_pct5h`, or zero. It is not in `lib/` so it cannot be unit-tested. The existing `tests/computeApiUsedPct.test.js` re-implements it as a mirror function — a known fragility.
+
+**Action:** Move `computeApiUsedPct` to `lib/quota-utils.js` (new file, UMD pattern). Import in `index.html` before `app.js`. Update `tests/computeApiUsedPct.test.js` to import the real function. Also move `calcSpendPct(cost, limit)` — the formula `Math.min(100, (cost / limit) * 100)` — to the same file since it appears in 3 places (`app.js`, `lib/firebase.js`, `lib/rtk-metrics.js`).
+
+---
+
+#### R6-A-2 — `seedBrandQuotas` is coupled to Firebase as a side effect (P2)
+
+**File:** `server.js:410` `await publishToFirebase(results, env, rtkSpend).catch(…)`
+
+A cache-refresh function should return data; callers decide what to do with it. The current coupling means:
+- You cannot call `seedBrandQuotas()` in a test without mocking `publishToFirebase`.
+- A Firebase outage causes `seedBrandQuotas()` to log an error even though the quota data is fine.
+
+**Action:** Return `{ cached, results, forced, env, rtkSpend }` from `seedBrandQuotas()`. Call `publishToFirebase` from the two call sites in `server.js` (`startup` and `POST /api/seed-quotas`). The GET handler already gets the result — it should not publish.
+
+---
+
+#### R6-A-3 — Render coalescing covers SSE but not the 30s poll timer (P2)
+
+**File:** `app.js` refresh timer
+
+The 30-second `refreshTimer` calls `calculateAndRenderDashboard()` directly on every tick — no coalescing. If an SSE message arrives at the same time as the timer fires, two renders happen within milliseconds.
+
+**Action:** Use a single `scheduleRender()` helper that debounces at 150ms. Both the SSE handler and the timer call `scheduleRender()` instead of `calculateAndRenderDashboard()` directly.
+
+---
+
+#### R6-F-1 — Budget-exhaustion forecast (new feature, P3)
+
+**File:** `app.js` `renderBrandCards()`
+
+The web dashboard shows spend % and a "Resets at HH:MM" badge but no forward projection. A subtitle line under the percentage — e.g. _"at this rate, budget exhausted ~14:30"_ — would be one formula:
+
+```
+burnRate = cost5h / Math.max(1, (now - earliest5hTimestamp) / 1000)  // $/s
+secondsUntilBudgetExhausted = (limit5h - cost5h) / burnRate
+forecastMs = now + secondsUntilBudgetExhausted * 1000
+```
+
+Only show if `burnRate > 0` and `forecastMs < resetMs` (i.e., budget runs out before the window resets). No new dependencies.
+
+**Action:** Add a `formatForecast(data, meta, now)` helper in `lib/quota-utils.js` (see R6-A-1). Render a `<small class="forecast-badge">` under the 5h percentage if the function returns a non-null string.
+
+---
+
+#### R6-F-2 — Progressive poll interval when approaching limit (P3)
+
+**File:** `server.js` seed schedule (currently lazy/on-demand only), `app.js` refresh timer
+
+When any brand's `spend_pct5h` or `spend_pct_weekly` exceeds 80%, a 30-second client refresh is too slow for active budget management.
+
+**Action:** After each `fetchRealData()` call in `app.js`, check `Math.max(...allBrands.map(b => barPct5h(b)))`. If > 80%, set the next refresh timer to 10s; otherwise 30s. No server changes needed.
+
+---
+
+#### R6-P-1 — ESP32 companion needs formal R6 review (P2)
+
+The ESP32 firmware has had three significant changes since the last reviewer pass (R5):
+1. Hardware swap: SSD1306 128×64 → ST7789 240×280 color TFT (new display library, new layout)
+2. Brand color palette updated to match web dashboard dark-mode CSS custom properties
+3. Firebase timestamp fix: `reset_at` now written in seconds (÷1000) from `lib/firebase.js`
+
+None of these have a formal review entry in `docs/REVIEWS.md`.
+
+**Known gap surfaced by R6 brainstorm:** For Claude (`unit = "per_minute"`) and Gemini (`unit = "not_exposed"`), the ESP32 stats row shows `38% / 62% / 100%` — percent of spend budget — rather than absolute token counts. This is correct and matches the web dashboard but the display could be more explicit. Tracked as Known Gap #12 in `README.md`.
+
+**Action:** Write R6 in `docs/REVIEWS.md` covering: timestamp conversion correctness, `sfx` suffix guard (`total == 100`), color palette alignment, and the stats-row semantic for Claude/Gemini.
+
+---
+
+#### R6-P-2 — `app.js` is still 1,302 lines (TL-5 still open) (P1)
+
+The Phase 3 plan extracted `server.js` concerns but `app.js` was not split. Highest-value extraction:
+
+| Extract to | What | Why |
+|---|---|---|
+| `lib/quota-utils.js` | `computeApiUsedPct`, `calcSpendPct` | Testable business logic (see R6-A-1) |
+| `lib/format.js` | `formatCurrency`, `formatNumber`, `formatTimeRemaining` | Already partially in `lib/format.js`; complete the migration |
+| `lib/dom-utils.js` | `appendConsoleLine`, `logEventSafe`, `escapeHtml` | Already in `lib/dom-utils.js`; remove duplicates in `app.js` |
+
+End state: `app.js` drops to ~700 lines (state, render orchestration, event wiring).
+
+---
+
+### 8.4 Updated Priority Matrix (R6 items only)
+
+| ID | Area | Impact | Effort | Priority |
+|---|---|---|---|---|
+| **R6-DO-1** | Restore CI pipeline (deleted) | Critical | XS | **P0** |
+| **R6-A-1** | Extract `computeApiUsedPct` → `lib/quota-utils.js` + real tests | High | S | **P1** |
+| **R6-P-2** | Complete `app.js` split (TL-5 continuation) | Medium | M | **P1** |
+| **R6-DO-2** | Bind server to `127.0.0.1` | Low | XS | **P2** |
+| **R6-DO-3** | Add uncaught-exception handler | Medium | XS | **P2** |
+| **R6-A-2** | Decouple `publishToFirebase` from `seedBrandQuotas` | Medium | S | **P2** |
+| **R6-A-3** | Unify render coalescing (timer + SSE) | Low | XS | **P2** |
+| **R6-P-1** | Write R6 review entry for ESP32 firmware | Medium | S | **P2** |
+| **R6-F-1** | Budget-exhaustion forecast subtitle | High (UX) | S | **P3** |
+| **R6-F-2** | Progressive poll interval at >80% usage | Medium | S | **P3** |
+
+---
+
+### 8.5 Phase 6 — R6 items (ordered by dependency)
+
+1. **R6-DO-1** — Restore `.github/workflows/ci.yml`. Unblocks everything else by ensuring the guard is back.
+2. **R6-DO-2** — `server.listen(PORT, '127.0.0.1', …)`.
+3. **R6-DO-3** — Add `process.on('uncaughtException')` / `process.on('unhandledRejection')`.
+4. **R6-A-1** — Extract `computeApiUsedPct` + `calcSpendPct` → `lib/quota-utils.js`; update real test.
+5. **R6-A-2** — Decouple `publishToFirebase` from `seedBrandQuotas`; move call to the two call-sites.
+6. **R6-A-3** — Single `scheduleRender()` debouncer for both SSE and timer.
+7. **R6-P-1** — Write R6 review pass in `docs/REVIEWS.md`.
+8. **R6-P-2** — Complete `app.js` split (quota-utils, dom-utils, format — remove duplicates).
+9. **R6-F-1** — `formatForecast()` in `lib/quota-utils.js`; render forecast badge in brand cards.
+10. **R6-F-2** — Progressive refresh interval in `app.js` refresh timer.

@@ -40,6 +40,32 @@ describe('detectBrand (shared logic)', () => {
     expect(detectBrand('git status')).toBeNull();
   });
 
+  it('returns null for shell commands whose arguments mention brand names', () => {
+    // Real false-positive cases from the RTK DB — grep/cat/etc. with 'claude'
+    // in their search pattern or file path.
+    expect(detectBrand("grep -rn 'claude' app.js")).toBeNull();
+    expect(detectBrand("grep -rn 'claude\\|anthropic\\|ANTHROPIC\\|per_minute' server.js")).toBeNull();
+    expect(detectBrand('cat /private/tmp/claude-501/project/tasks/output.txt')).toBeNull();
+    expect(detectBrand("grep -rn 'fetchClaudeQuota\\|BRAND_FETCHERS' server.js")).toBeNull();
+    expect(detectBrand('grep -rn color-gemini color-claude styles.css')).toBeNull();
+    expect(detectBrand('find . -name "*claude*"')).toBeNull();
+    expect(detectBrand('grep -rn minimax app.js')).toBeNull();
+    expect(detectBrand('grep -rn glm server.js')).toBeNull();
+  });
+
+  it('returns null for Firebase/localhost URLs with brand names in the path', () => {
+    // The dashboard's own Firebase reads/writes have brand names in the URL path
+    expect(detectBrand('curl -s https://token-count-973cd-default-rtdb.asia-southeast1.firebasedatabase.app/display/quotas/claude.json?auth=token')).toBeNull();
+    expect(detectBrand('curl -s https://token-count-973cd-default-rtdb.asia-southeast1.firebasedatabase.app/ai_quota/minimax.json?auth=token')).toBeNull();
+    expect(detectBrand('curl -s http://localhost:3000/api/rtk')).toBeNull();
+    expect(detectBrand('curl http://127.0.0.1:3000/api/seed-quotas')).toBeNull();
+  });
+
+  it('still detects real LLM API calls (curl to provider endpoints)', () => {
+    expect(detectBrand('curl -X POST https://api.anthropic.com/v1/messages')).toBe('claude');
+    expect(detectBrand('curl https://open.bigmodel.cn/api/paas/v4/chat/completions -d glm-4')).toBe('glm');
+  });
+
   it('returns null for empty or non-string input', () => {
     expect(detectBrand('')).toBeNull();
     expect(detectBrand(null)).toBeNull();

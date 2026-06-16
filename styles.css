@@ -376,6 +376,15 @@ button.btn-danger-outline:hover {
   color: var(--danger);
 }
 
+.forecast-badge {
+  display: block;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--warning);
+  margin-top: 1px;
+  opacity: 0.85;
+}
+
 .brand-limit-header {
   display: flex;
   justify-content: space-between;
