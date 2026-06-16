@@ -4,9 +4,7 @@ Rolling Spend Limits were a mix of fixed and configurable: window durations (`FI
 
 ## Status
 
-Accepted, **partially applied**. The windows are fixed in code (`FIVE_HOUR_WINDOW_MS` and `ONE_WEEK_WINDOW_MS` are constants). The `windowLabel` field is **still present in `DEFAULT_BRAND_METADATA` in `app.js`** and is **still read in `renderBrandCards()`** to populate the rolling-limit title. A follow-up patch is required to delete the field and replace the read with a literal `"5-Hour"`.
-
-The same status applies to `meta.limit`: it is still in `DEFAULT_BRAND_METADATA`, still migrated into loaded state, and still never read by the renderer. Tracked as dead code for deletion in `docs/REVIEWS.md` R3.
+Accepted, **fully applied**. The windows are fixed in code (`FIVE_HOUR_WINDOW_MS` and `ONE_WEEK_WINDOW_MS` are constants). The `windowLabel` field is **removed from `DEFAULT_BRAND_METADATA`** and from the migration loop in `app.js`; `renderBrandCards()` no longer reads it (the rolling-limit title is a literal). `meta.limit` is also **removed from `DEFAULT_BRAND_METADATA`**, the migration loop, and the renderer. `grep -R "windowLabel\|meta\.limit" app.js server.js lib/` returns no hits. Closed in `docs/REVIEWS.md` R3.
 
 ## Considered Options
 

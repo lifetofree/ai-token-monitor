@@ -39,7 +39,7 @@ Re-introduce Real RTK Monitor Mode as the **default** Monitor Mode. Preserve Sim
 - `lastSeenCommandId` (the real-mode "log only new commands" cursor) is back. Initialised to 0 on first load (forces full-log on initial load), then bumped to the max `id` seen.
 - `cmdText` is back on `Request` for `source: 'real'` rows; it's the RTK `original_cmd`. The Live Request Log Feed renders this through `{text}` segments (no XSS).
 - `server.js` gains three endpoints: `/api/rtk`, `/api/rtk/summary`, `/api/rtk/stream`. Plus an `initWatcher()` that `fs.watch()`es the RTK DB directory and broadcasts new commands to `sseClients[]`.
-- `RTK_DB_PATH` env var is honoured (overrides the default `~/Library/Application Support/rtk/history.db`). Note: the per-key `.env` writer drops this key, so the user must set it via the shell (R3 env-var-loss regression).
+- `RTK_DB_PATH` env var is honoured (overrides the default `~/Library/Application Support/rtk/history.db`). Note: the per-key `.env` writer still whitelists only the four provider API keys, so the user must set `RTK_DB_PATH` via the shell (the writer does preserve the key once it's in `.env` — sibling-preservation is fixed in `lib/env.js` per R3).
 - The mode switcher in the header is visible. Switching modes re-renders the dashboard immediately.
 - `0005-remove-real-rtk-mode.md` is now historical context. Its consequences section is still accurate (the things it removed are now back), but the "Removal" framing no longer applies.
 - The `BUSINESS_GOALS.md`, `REQUIREMENTS.md`, `USER_JOURNEY.md`, `TECH_STACK.md`, `SYSTEM_DESIGN.md`, `REVIEWS.md`, and `CONTEXT.md` documents are all updated to reflect the re-introduction (PM/Tech Lead/Architect pass; this ADR is the canonical reference).

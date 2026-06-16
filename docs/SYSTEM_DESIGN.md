@@ -21,10 +21,10 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 
 ```
 .
-├── app.js                  # All client logic (~1,296 lines)
+├── app.js                  # All client logic (~1,295 lines)
 ├── index.html              # Static markup
 ├── styles.css              # Design system
-├── server.js               # Node server (~1,405 lines)
+├── server.js               # Node server (~413 lines; lib/ owns the heavy lifting)
 ├── package.json            # devDependency: vitest
 ├── favicon.svg             # Static asset (whitelisted)
 ├── .env                    # User API keys (gitignored)
@@ -34,18 +34,32 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 ├── STATUS.md               # Project status snapshot
 ├── README.md               # Project overview and Known Gaps
 ├── lib/
-│   └── antigravity-parser.js  # Parses Antigravity CLI transcript .jsonl files
-├── tests/
+│   ├── antigravity-parser.js  # Agent transcript → token/cost stats
+│   ├── brand-detect.js        # detectBrand() — maps original_cmd to brand key (UMD)
+│   ├── brand-fetchers.js      # HTTPS quota fetchers per brand + shared httpsRequest
+│   ├── dom-utils.js           # escapeHtml (shared browser + test)
+│   ├── env.js                 # .env loader, masker, HTTP handlers (preserves non-whitelisted keys)
+│   ├── firebase.js            # publishToFirebase() — PUTs sanitized snapshot for ESP32
+│   ├── format.js              # formatCurrency, formatDuration, etc. (UMD)
+│   ├── pricing-defaults.js    # UMD module: PRICING_DEFAULTS (shared server + browser)
+│   ├── quota-cache.js         # brand_quota SQLite table, TTL constants, cache helpers
+│   ├── quota-utils.js         # QuotaUtils: computeApiUsedPct, calcSpendPct, calcForecast (UMD)
+│   ├── rtk-metrics.js         # Server-side RTK DB spend aggregation
+│   └── sse-watcher.js         # SSE client registry + DB file watcher
+├── tests/                     # Vitest suite (15 files, 119 tests)
 │   ├── antigravityParser.test.js
 │   ├── computeApiUsedPct.test.js
 │   ├── cost.test.js
 │   ├── csv.test.js
 │   ├── detectBrand.test.js
+│   ├── envRoundTrip.test.js
 │   ├── escapeHtml.test.js
 │   ├── fetchGeminiQuota.test.js
 │   ├── fetchMinimaxQuota.test.js
 │   ├── format.test.js
 │   ├── getRtkSpendMetrics.test.js
+│   ├── modeSwitch.test.js
+│   ├── pricingDefaults.test.js
 │   ├── reset5hFallback.test.js
 │   └── rollingLogFilter.test.js
 ├── docs/
@@ -453,7 +467,7 @@ seedBrandQuotas(force) (server-side, every 30s via dashboard tick)
 ## 7. Design patterns in use
 
 - **Safe DOM construction**: `appendConsoleLine(source, parts)` distinguishes `{html}` (trusted) from `{text}` (escaped). All untrusted input goes through `{text}`. RTK `original_cmd` is rendered through `{text}` segments in the Real-Time log path.
-- **Per-key env writer**: `POST /api/env/key` whitelists a key name. The "preserve siblings" intent is documented but not yet implemented (see R3).
+- **Per-key env writer**: `POST /api/env/key` whitelists a key name. **Siblings are preserved** — the writer reads the existing `.env` first, mutates the targeted key, and writes the full map back. `RTK_DB_PATH` and `FIREBASE_*` round-trip cleanly. Covered by AC-21 and `tests/envRoundTrip.test.js`; closed in `../docs/REVIEWS.md` R3.
 - **Pre-populated history**: `generateInitialMockHistory()` seeds 40 mock Requests on first load so the rolling-window bars have non-zero data to render immediately.
 - **API-driven bar with local fallback**: `computeApiUsedPct()` returns `null` when the API doesn't expose a quota; the renderer falls back to the local-spend percentage. The bar tooltip names the source so the user can tell which one is driving the fill.
 - **Idempotent `ALTER TABLE` migrations**: `ensureBrandQuotaTable()` runs `CREATE TABLE IF NOT EXISTS` followed by two `ALTER TABLE … ADD COLUMN` statements; each is wrapped in a no-op handler so re-running is safe.

@@ -19,7 +19,7 @@ The dashboard was originally designed to read proxy-routed LLM traffic from RTK'
 - The Request `source` attribute (introduced in `0002-unify-request-stores-by-source.md`) is now permanently `'sim'` and is no longer a meaningful field. It is kept in the schema for forward compatibility (a future Real Mode re-introduction would need it), but the Request store is not currently filtered by it.
 - `cmdText` (the original RTK command) is no longer surfaced; the "Real" log path in `app.js` is gone.
 - `CONTEXT.md` no longer lists `Real Mode`, `Source`, or `Monitor Mode` as separate terms; "Simulation Mode" is the (sole) data source.
-- The `docs/REQUIREMENTS.md`, `docs/USER_JOURNEY.md`, `docs/TECH_STACK.md`, `docs/SYSTEM_DESIGN.md`, and `docs/REVIEWS.md` documents were rewritten to drop Real Mode references. The "env var loss" bug from the prior implementation is now historical context; the current `/api/env/key` still has the loss issue and is tracked in `docs/REVIEWS.md` R3.
+- The `docs/REQUIREMENTS.md`, `docs/USER_JOURNEY.md`, `docs/TECH_STACK.md`, `docs/SYSTEM_DESIGN.md`, and `docs/REVIEWS.md` documents were rewritten to drop Real Mode references. The "env var loss" bug from the prior implementation was historical context; the current `/api/env/key` (and `/api/env`) preserve every key outside the four-key whitelist (`RTK_DB_PATH`, `FIREBASE_*`, etc.) — the fix landed in `lib/env.js` and is closed in `docs/REVIEWS.md` R3.
 
 ## Supersedes
 

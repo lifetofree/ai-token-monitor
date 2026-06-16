@@ -34,8 +34,8 @@ To enable the ESP32 companion mirror, set `FIREBASE_URL` (or `FIREBASE_DB_URL`) 
 ### Running the test suite
 ```bash
 npm install    # first time only
-npm test       # runs vitest run (15 files, 102 tests, ~500ms)
-npm run check  # node --check on server.js and app.js
+npm test       # runs vitest run (15 files, 119 tests, ~415ms)
+npm run check  # node --check on server.js, app.js, and every lib/*.js
 ```
 
 ### Flashing the ESP32 companion
@@ -183,14 +183,15 @@ See [`docs/SYSTEM_DESIGN.md`](./docs/SYSTEM_DESIGN.md) for full contracts and [`
 │   ├── brand-detect.js        # detectBrand() — maps original_cmd to brand key
 │   ├── brand-fetchers.js      # HTTPS quota fetchers per brand (Claude/Gemini/GLM/MiniMax)
 │   ├── dom-utils.js           # escapeHtml (shared browser + test)
-│   ├── env.js                 # .env loader, masker, HTTP handlers
+│   ├── env.js                 # .env loader, masker, HTTP handlers (preserves non-whitelisted keys)
 │   ├── firebase.js            # publishToFirebase() — PUTs sanitized snapshot for ESP32
 │   ├── format.js              # formatCurrency, formatDuration, etc.
 │   ├── pricing-defaults.js    # UMD module: PRICING_DEFAULTS (shared server + browser)
 │   ├── quota-cache.js         # brand_quota SQLite table, TTL constants, cache helpers
+│   ├── quota-utils.js         # QuotaUtils: computeApiUsedPct, calcSpendPct, calcForecast
 │   ├── rtk-metrics.js         # Server-side RTK DB spend aggregation
 │   └── sse-watcher.js         # SSE client registry + DB file watcher
-├── tests/                   # Vitest suite (15 files, 102 tests)
+├── tests/                   # Vitest suite (15 files, 119 tests)
 │   ├── format.test.js
 │   ├── cost.test.js
 │   ├── detectBrand.test.js
@@ -249,24 +250,30 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 | 📋 Product Manager (PM) | `docs/REQUIREMENTS.md`, `docs/USER_JOURNEY.md` | Complete — §2.8 Provider-Quota Tracking, AC-13..AC-16, dual-monitor journey |
 | ⚡ Technical Lead | `docs/TECH_STACK.md` | Complete — endpoint inventory, MiniMax HTTPS, server-side SQLite, outbound-network security baseline |
 | 🏗️ Architect | `docs/SYSTEM_DESIGN.md`, `docs/adr/0006-…` | Complete — 9 API contracts, dual-monitor data flow, defensive-parsing pattern, hardware-companion topology |
-| 💻 TDD Engineer | `tests/`, `lib/`, `vitest.config.js`, `package.json` | Complete — 15 test files, 102 tests; `lib/` now has 11 shared modules; mirror-function approach documented per file |
-| 🕵️ Reviewer | `docs/REVIEWS.md` | Complete — R1, R2, R3, R4, R5 logged (8 ✅, 3 ⚠️, 0 ❌ in R5) |
+| 💻 TDD Engineer | `tests/`, `lib/`, `vitest.config.js`, `package.json` | Complete — 15 test files, 119 tests; `lib/` has 12 shared modules; mirror-function approach documented per file |
+| 🕵️ Reviewer | `docs/REVIEWS.md` | Complete — R1, R2, R3, R4, R5, R6 logged; R3 fully closed; R5's "0 regressions" was corrected in R6 to "1 regression" (R5-U1 / R6-R1: mode switcher missing from UI, AC-12 unmet) |
 | 🚀 DevOps Engineer | `.github/workflows/ci.yml`, `Dockerfile`, `.dockerignore` | Complete — CI runs lint+test+boot smoke; container image is `node:20-slim` + system sqlite3 |
 
 ### Known Gaps
 
-1. **Env-var loss bug** — the per-key writer drops `.env` keys outside the four-key whitelist, including `RTK_DB_PATH` which Real RTK mode honours. See `docs/REVIEWS.md` R3.
-2. **Dead fields in brand metadata** — `meta.limit` and `meta.windowLabel` are still in `DEFAULT_BRAND_METADATA`. See `docs/adr/0004-…` and `docs/REVIEWS.md` R3.
-3. **Cache-model audit on pre-populated history** — `SIM_HISTORY_PRELOAD` may have rows under the old subset model; clear with *Reset Data* in the header.
-4. **MiniMax field-name fragility** — the fetcher reads undocumented fields (`current_interval_remaining_percent`, `weekly_end_time`, etc.). Defensive parsing tries multiple aliases; a future API change could silently break it. Tracked in `docs/SYSTEM_DESIGN.md` §8.
+1. **Mode switcher missing from UI** — `index.html` has no `<select id="monitor-mode-select">`; `app.js` hardcodes `state.monitorMode = 'real'` and never reads `localStorage.atm_monitor_mode`. The simulator and `getActiveRequests()` are wired in code; only the UI control and its event handler are missing. **AC-12 is unmet.** Tracked in `docs/REVIEWS.md` R6-R1 (re-opens R5-U1).
+2. **Cache-model audit on pre-populated history** — `SIM_HISTORY_PRELOAD` may have rows under the old subset model; clear with *Reset Data* in the header. Tracked in `docs/REVIEWS.md` R5-D2.
+3. **MiniMax field-name fragility** — the fetcher reads undocumented fields (`current_interval_remaining_percent`, `weekly_end_time`, etc.). Defensive parsing tries multiple aliases; a future API change could silently break it. Tracked in `docs/SYSTEM_DESIGN.md` §8 and `docs/REVIEWS.md` R5-X2.
+4. **Cache-staleness UX** — when a force-refresh of `brand_quota` fails, the dashboard falls back to the local rolling estimate with no user-visible signal. Tracked in `docs/SYSTEM_DESIGN.md` §8 and `docs/REVIEWS.md` R5-X1.
 5. **No historical quota trend** — only a current snapshot, no time series.
 6. **No accessibility audit** — keyboard nav, screen-reader labels, focus order not audited.
 7. **No error boundary in the UI** — a single failed fetch silently degrades the dashboard.
 8. **`localStorage`-only persistence** — Request history does not survive a `localStorage` clear (the "Reset Data" button does this).
-9. **Mirror-function tests** — most of the vitest suite re-implements the canonical formulas from `app.js` / `server.js` because those files are browser/server scripts, not modules. `lib/antigravity-parser.js` is the first exception (the parser is imported in tests). Follow-up: extract `format*` / `cost*` / `detectBrand` / `computeApiUsedPct` into the same `lib/` tree. Tracked in `STATUS.md` and `docs/REVIEWS.md` R5.
+9. **Mirror-function tests** — most of the vitest suite re-implements the canonical formulas from `app.js` / `server.js` because those files are browser/server scripts, not modules. `lib/antigravity-parser.js`, `lib/pricing-defaults.js`, and `lib/brand-detect.js` are the exceptions (UMD). Follow-up: extract `format*` / `cost*` / `computeApiUsedPct` into the same `lib/` tree.
 10. **ESP32 firmware not unit-tested** — the `.ino` is a single-file Arduino sketch; the only verification is flashing it. The NTP/formatter code would benefit from being pulled out into a host-runnable test (host-side mock of `WiFi` + `time()`).
 11. **Droid-Shield secret-scanner false positives** — the local pre-push hook flags `tokens5h` variable names and `0` default values as if they were tokens. Currently worked around with `git push --no-verify`. Tracked separately; not a real security issue.
 12. **ESP32 stats row shows % for Claude/Gemini** — when the provider's API doesn't expose a native token quota (Claude: per-minute bucket; Gemini: not exposed), the ESP32 stats row shows `Used%/Left%/Total%` derived from `spend_pct5h`. The web dashboard shows the same spend %; no mismatch, but absolute token counts are not surfaced on the display for these two brands.
+
+### Recently Closed
+
+- **Env-var sibling preservation** — `lib/env.js` `handlePostEnvKey` / `handlePostEnv` now read the existing `.env`, mutate only the targeted key, and write the full map back. `RTK_DB_PATH` and `FIREBASE_*` round-trip. `tests/envRoundTrip.test.js` verifies; AC-21 covers. Closed in `docs/REVIEWS.md` R3.
+- **`meta.limit` and `windowLabel` cleanup** — both fields removed from `DEFAULT_BRAND_METADATA` and the migration loop; `renderBrandCards()` reads no window label. `grep -R "windowLabel\|meta\.limit" app.js server.js lib/` returns no hits. ADR-0004 status updated to "fully applied." Closed in `docs/REVIEWS.md` R3.
+- **Cache model applied in code (ADR-0003)** — `addRequest`, `fetchRealRTKData`, `connectRTKStream`, and `generateInitialMockHistory` all use the disjoint model. `cost = (input * inputRate + output * outputRate) / 1M`; `savedTokens` is disjoint. Closed in `docs/REVIEWS.md` R3.
 
 ### Recently Closed
 
@@ -276,7 +283,7 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 - **Agent usage tracking** — `lib/antigravity-parser.js` + `agent_usage` table + `GET /api/agent-usage` for `total` / `5h` / `weekly` rollups.
 - **RTK spend-driven Claude reset** — `reset_at` is overridden with the RTK earliest-5h timestamp so the badge matches the rolling window the bar is showing.
 - **GLM `window_started_at` fallback** — server-side column gives the 5h reset a stable boundary for brands whose API doesn't expose it.
-- **Vitest suite** — 12 files, 86 tests, ~300 ms. Includes format, cost, `detectBrand`, `computeApiUsedPct`, MiniMax response parsing, Gemini response parsing, RTK spend metrics, GLM 5h reset fallback, Antigravity parser, CSV builder, `escapeHtml`, and the LLM-only log feed filter.
+- **Vitest suite** — 15 files, 119 tests, ~415 ms. Includes format, cost, `detectBrand`, `computeApiUsedPct`, MiniMax response parsing, Gemini response parsing, RTK spend metrics, GLM 5h reset fallback, Antigravity parser, CSV builder, `escapeHtml`, the LLM-only log feed filter, monitor-mode switching, `env` sibling-preservation round-trip, and `PRICING_DEFAULTS` shape / single-source-of-truth.
 - **CI + Docker** — GitHub Actions runs `npm install`, `npm run check`, `npm test`, and a sqlite3 boot probe; `Dockerfile` builds a minimal `node:20-slim` image with a `/api/summary` healthcheck.
 - **Multi-agent SDLC framework** — `.ai.agents/` defines 7 role-based agents (PO, PM, Tech Lead, Architect, Coder, Reviewer, DevOps) with explicit handoffs and `STATUS.md` as the single source of truth.
 - **Antigravity RTK rules** — `.agents/rules/antigravity-rtk-rules.md` captures coding-agent conventions for the RTK CLI / `.rtk/filters.toml`.

@@ -118,14 +118,14 @@ _Avoid_: 7d window, rolling weekly
 > **Domain expert:** "It was a synthetic entry representing personal-optimized traffic. Dropped in ADR-0001. The four real Brands are gemini, claude, minimax, and glm."
 
 > **Dev:** "How do I point the Real RTK reader at a different DB?"
-> **Domain expert:** "Set the `RTK_DB_PATH` env var before launching `node server.js`. Note that `/api/env/key` cannot write it — that endpoint is whitelisted to the four provider API keys only. The env-var-loss bug is tracked in R3."
+> **Domain expert:** "Set the `RTK_DB_PATH` env var before launching `node server.js`. The per-key `/api/env/key` endpoint whitelists only the four provider API keys, so adding `RTK_DB_PATH` via the UI is not possible — set it via the shell. The env-var sibling-preservation fix landed in `lib/env.js`: a write to a whitelisted key preserves `RTK_DB_PATH` and `FIREBASE_*` (closed in `docs/REVIEWS.md` R3)."
 
 ## Flagged ambiguities
 
 - **"Antigravity"** appeared in two roles: project author and a Brand key. Resolved: the Brand `antigravity` is dropped from the data model. The author name is orthogonal to the dashboard's Brand list.
 - **"Actual Cost"** was a column header that implied the dashboard knew what was actually charged. Resolved: it never did. The label was redundant; the column is now `Cost`, computed from configured Pricing.
-- **`meta.limit`** is a per-Brand field that is never read by the renderer. **Status: still present in `DEFAULT_BRAND_METADATA`; deletion tracked in `docs/REVIEWS.md` R3.**
-- **`windowLabel`** is a per-Brand cosmetic string that suggests the window length is configurable. **Status: still present in `DEFAULT_BRAND_METADATA` and still read by `renderBrandCards()`; deletion tracked in `docs/REVIEWS.md` R3.** Windows are fixed at 5h and 1w.
+- **`meta.limit`** is a per-Brand field that is never read by the renderer. **Status: removed from `DEFAULT_BRAND_METADATA` and from the migration loop; closed in `docs/REVIEWS.md` R3.**
+- **`windowLabel`** is a per-Brand cosmetic string that suggests the window length is configurable. **Status: removed from `DEFAULT_BRAND_METADATA` and from the migration loop; `renderBrandCards()` no longer reads it (the rolling-limit title is a literal); closed in `docs/REVIEWS.md` R3.** Windows are fixed at 5h and 1w.
 - **The cache model** is internally inconsistent: `billedInput = inputTokens - savedTokens` (subset model) coexists with a Cache Hit Rate formula that treats the two as disjoint. **Status: resolved — disjoint model is now applied in code per `docs/adr/0003-cache-model-disjoint-input-and-saved.md`.**
 - **"Provider" vs "Brand"** are used interchangeably in UI copy. Resolved: the canonical term is Brand. "Provider" survives in user-facing strings (e.g. the simulation modal) but never in data fields.
 - **Real RTK Monitor vs Simulation** are two Monitor Modes. Resolved by `docs/adr/0006-reintroduce-real-rtk-mode.md` (to be written by the Architect): Real RTK is the default, Simulation is the offline dev/demo mode. Both share the schema; `source` distinguishes them.

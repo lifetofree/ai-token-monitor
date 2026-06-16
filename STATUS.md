@@ -13,8 +13,8 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 - [x] **📋 Product Manager (PM)**: `docs/REQUIREMENTS.md` and `docs/USER_JOURNEY.md` written and refreshed; `§2.8 Provider-Quota Tracking` added, 4 new acceptance criteria (AC-13 to AC-16), AC-12 corrected for the re-introduced mode switcher, new primary journey "Am I about to hit the vendor's 5-hour cap?".
 - [x] **⚡ Technical Lead**: Vanilla HTML/CSS/JS, zero-dep, local Node server; `docs/TECH_STACK.md` written and refreshed to cover the `/api/seed-quotas` endpoint, SSE stream, MiniMax HTTPS integration, server-side SQLite layer, and outbound-network security baseline.
 - [x] **🏗️ Architect**: `docs/SYSTEM_DESIGN.md` rewritten with `brand_quota` schema, new API contracts (`/api/rtk`, `/api/rtk/summary`, `/api/rtk/stream`, `/api/seed-quotas`), dual-monitor data flow, and the "Defensive API parsing" design pattern. `docs/adr/0006-reintroduce-real-rtk-mode.md` written; `0005` and `0003` status updated.
-- [x] **💻 TDD Engineer**: Implemented formatters, simulation engine, settings form, **Real RTK mode with SSE streaming**, **provider-quota tracking with live MiniMax fetcher**, and **API-driven progress bar**. **Vitest suite**: 15 test files, 102 tests. `lib/` now has 11 shared modules (`antigravity-parser`, `brand-detect`, `brand-fetchers`, `dom-utils`, `env`, `firebase`, `format`, `pricing-defaults`, `quota-cache`, `rtk-metrics`, `sse-watcher`). The mirror-function approach is documented at the top of each test file.
-- [x] **🕵️ Reviewer**: Five review passes complete (R1, R2, R3, R4, R5) and logged in `docs/REVIEWS.md`. R5 covers the Real RTK re-introduction, `brand_quota` schema, MiniMax fetcher, API-driven bar, and the recent UI polish — 8 ✅, 3 ⚠️ documented gaps, 0 ❌ regressions.
+- [x] **💻 TDD Engineer**: Implemented formatters, simulation engine, settings form, **Real RTK mode with SSE streaming**, **provider-quota tracking with live MiniMax fetcher**, and **API-driven progress bar**. **Vitest suite**: 15 test files, 119 tests, ~415 ms. `lib/` has 12 shared modules (`antigravity-parser`, `brand-detect`, `brand-fetchers`, `dom-utils`, `env`, `firebase`, `format`, `pricing-defaults`, `quota-cache`, **`quota-utils`**, `rtk-metrics`, `sse-watcher`). The mirror-function approach is documented at the top of each test file.
+- [x] **🕵️ Reviewer**: Six review passes complete (R1, R2, R3, R4, R5, R6) and logged in `docs/REVIEWS.md`. R3 is **fully closed** (cache model applied; `meta.limit` / `windowLabel` removed; env-var-loss fixed; tests + CI in place; Real-Mode docs re-synced with ADR-0006). R5 originally claimed "0 regressions"; R6 re-checked and corrected that to "1 regression" (R5-U1 / R6-R1: the mode switcher is missing from `index.html`, AC-12 is unmet). R6 also closed four doc-drift items.
 - [x] **🚀 DevOps Engineer**: `package.json` and `node server.js` working. `.gitignore` is in place. CI pipeline landed at `.github/workflows/ci.yml` (Node 20, `npm install`, `npm run check`, `npm test`, sqlite3 smoke test, GET `/`, `/api/summary`, `/api/seed-quotas` boot probe). Container image landed: `Dockerfile` (node:20-slim + system sqlite3, unprivileged user, loopback bind, healthcheck on `/api/summary`) and `.dockerignore` (mirrors `.gitignore`, excludes tests/docs/agent scaffolding).
 
 ---
@@ -48,7 +48,7 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 
 ### Security caveats
 
-- The per-key `/api/env/key` writer **drops** any `.env` keys outside the four-key whitelist on update. Tracked in `docs/REVIEWS.md` R3. `RTK_DB_PATH` (a non-whitelisted key the Real RTK mode honours via `process.env`) is one such key — adding it via the UI is silently lost; the user must set it via the shell.
+- The per-key `/api/env/key` writer **preserves** every key outside the four-key whitelist on update (it reads the existing `.env`, mutates the targeted key, and writes the full map back). `RTK_DB_PATH` and `FIREBASE_*` round-trip cleanly. Verified by `tests/envRoundTrip.test.js` and by AC-21. Closed in `docs/REVIEWS.md` R3.
 - The server binds to `0.0.0.0:3000` (Node default). Should be `127.0.0.1` in any deployment scenario; not a problem for a personal tool behind a CORS allowlist that already blocks cross-origin reads.
 
 ## ✅ Functional polish
@@ -86,14 +86,12 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 
 ## ❌ Known gaps
 
-- **Env-var loss bug**: per-key writer drops `.env` keys outside the four-key whitelist (including `RTK_DB_PATH` which the Real RTK mode honours) — see `docs/REVIEWS.md` R3
-- **Cache model in pre-populated history**: `generateInitialMockHistory()` and the cost path now use the disjoint model (per ADR-0003), but the pre-populated `SIM_HISTORY_PRELOAD` may still emit `inputTokens` values that look small relative to historical `savedTokens`; a follow-up audit is in the Reviewer's R5 scope
-- **`windowLabel` and `meta.limit` still in `DEFAULT_BRAND_METADATA`** — see ADR-0004 and `docs/REVIEWS.md` R3
+- **Mode switcher missing from UI** (regression): `index.html` has no `<select id="monitor-mode-select">`; `app.js` hardcodes `state.monitorMode = 'real'` and never reads `localStorage.atm_monitor_mode`. AC-12 / R5-U1 / R6-R1 is open. The simulator and `getActiveRequests()` are wired in code; only the UI control and its event handler are missing.
+- **Cache model in pre-populated history**: `generateInitialMockHistory()` and the cost path now use the disjoint model (per ADR-0003), but the pre-populated `SIM_HISTORY_PRELOAD` may still emit `inputTokens` values that look small relative to historical `savedTokens`; a follow-up audit is in the Reviewer's R5 scope (R5-D2)
 - `localStorage` only — no cross-restart persistence for Request history
 - Limit labels are hardcoded English; would need i18n
 - No accessibility audit (keyboard nav, screen reader labels)
 - No error boundary in the UI — a single failed fetch silently degrades the dashboard
-- `RTK_DB_PATH` honoured from `process.env` but not from `.env` due to the env-var-loss bug above
 - No historical quota trend chart (only current snapshot)
 
 ---

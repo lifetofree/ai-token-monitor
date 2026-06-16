@@ -56,7 +56,7 @@ A single developer (the project author) using multiple LLM Brands on one machine
 - Per-Request drill-down view (currently only aggregates are shown)
 - SQLite/JSON persistence for Request history across server restarts
 - Historical quota trend charts
-- `meta.limit` and `meta.windowLabel` field cleanup (tracked in R3)
+- "Send Custom Request" modal (dropped; the Active Provider selector handles the use case)
 
 ## 📈 Provider-Quota Tracking (v1 New Vision)
 

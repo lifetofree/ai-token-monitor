@@ -20,18 +20,18 @@
 - **Server-side SQLite caches** (in the same DB the server uses for the RTK history read; distinct from any user-owned DB):
   - `brand_quota` — provider-quota snapshot per Brand, with idempotent `ALTER TABLE` migrations for `reset_at_weekly` and `weekly_remaining`. Cache invalidation lives in `seedBrandQuotas()`.
   - **The dashboard does not own the RTK `commands` table** — that DB is read-only for our purposes; we never write to it.
-- **`.env`**: the dashboard writes user-supplied API keys to `.env` in its own working directory. Per-key writes are supposed to preserve siblings but currently drop any non-whitelisted keys (including `RTK_DB_PATH`, which Real RTK mode honours via `process.env`) — see `../docs/REVIEWS.md` R3.
+- **`.env`**: the dashboard writes user-supplied API keys to `.env` in its own working directory. Per-key writes **preserve** every key outside the four-key whitelist (the writer reads the existing `.env`, mutates the targeted key, and writes the full map back). `RTK_DB_PATH` and `FIREBASE_*` round-trip cleanly. Closed in `../docs/REVIEWS.md` R3; covered by AC-21 and `tests/envRoundTrip.test.js`.
 
 ### 1.3 External integrations
 
 - **MiniMax Token Plan API**: `https://www.minimax.io/v1/token_plan/remains`, `GET` with `Authorization: Bearer <MINIMAX_API_KEY>`. Returns `model_remains` entries with `end_time` (5h), `weekly_end_time` (weekly), `current_interval_remaining_percent` (5h), `current_weekly_remaining_percent` (weekly). Implemented in `fetchMinimaxQuota()` with defensive field-name extraction and chat-model entry selection by name regex.
 - **Claude, GLM**: quota is read from response headers on a probe request (`anthropic-ratelimit-requests-*` for Claude, `x-ratelimit-remaining-requests` / `x-ratelimit-limit-requests` for GLM).
 - **Gemini**: no quota API; the fetcher returns `unit: "not_exposed"` and the dashboard falls back to local-spend view.
-- **`.env`**: the dashboard writes user-supplied API keys to `.env` in its own working directory. Per-key writes are supposed to preserve siblings but currently drop any non-whitelisted keys — see `../docs/REVIEWS.md` R3.
+- **`.env`**: the dashboard writes user-supplied API keys to `.env` in its own working directory. Per-key writes **preserve** every key outside the four-key whitelist; `RTK_DB_PATH` and `FIREBASE_*` round-trip cleanly. Closed in `../docs/REVIEWS.md` R3.
 
 ### 1.4 Dependencies
 
-Zero runtime dependencies. `package.json` has no `dependencies` block. `devDependencies` is empty (a Vitest devDep is the natural next step — see §5).
+Zero runtime dependencies. `package.json` has no `dependencies` block. `devDependencies` is `vitest` (^1.6.0); see §5 for the suite (15 files, 119 tests, ~415 ms).
 
 The Node built-ins in use: `http`, `https` (`https.request` for the MiniMax fetcher), `fs`, `path`, `child_process` (`execFile` for the `sqlite3` reader; `exec` only to launch the browser at startup), `url`.
 
@@ -40,8 +40,9 @@ The system also depends on the **`sqlite3` CLI** being on `PATH` (not a Node dep
 ### 1.5 Tooling
 
 - `npm run dev` → `node server.js`
-- `node --check server.js` and `node --check app.js` are run manually during feature work as a syntax gate. A future CI step should automate this (DevOps task).
-- No linter, no formatter, no type checker, no test runner. **Known gap**: a Vitest suite is the natural next step for the pure functions (cost, savings, cache rate, CSV builder, `computeApiUsedPct`, MiniMax response parsing).
+- `npm run check` runs `node --check` on `server.js`, `app.js`, and every `lib/*.js` (glob). Wired into CI.
+- `npm test` runs the Vitest suite (15 files, 119 tests, ~415 ms). Wired into CI.
+- No linter, no formatter, no type checker.
 
 ## 2. Coding standards
 
@@ -96,7 +97,7 @@ The system also depends on the **`sqlite3` CLI** being on `PATH` (not a Node dep
 - **Path traversal**: `path.relative(STATIC_ROOT, filePath)` is checked for `..` or absolute. Traversal attempts get `403`.
 - **Static file whitelist**: only `index.html`, `app.js`, `styles.css`, `package.json`, `favicon.svg` are servable. `.env`, `server.js`, and any other file in the working directory are not.
 - **`.env` writer**: per-key endpoint whitelists the four allowed key names. Newlines are stripped from values to prevent `.env` injection.
-- **Env-var loss bug** (tracked in `../docs/REVIEWS.md` R3): the per-key writer currently drops any `.env` keys outside the four-key whitelist on update. The bug now **also affects Real RTK mode** because `RTK_DB_PATH` is a non-whitelisted key the server honours via `process.env`. Workaround: set `RTK_DB_PATH` in the shell, not via the API Tokens UI.
+- **Per-key writer preserves siblings**: `POST /api/env/key` whitelists a key name, but the writer reads the existing `.env` first and writes the full map back. `RTK_DB_PATH` (a non-whitelisted key the server honours via `process.env`) and `FIREBASE_*` round-trip cleanly. Closed in `../docs/REVIEWS.md` R3; verified by `tests/envRoundTrip.test.js`. Note: the per-key endpoint still rejects non-whitelisted *key names* in the write body — only the existing siblings are preserved.
 - **SQLite query construction**: all SQL is constructed via `escapeSQLString` / `escapeSQLNumber` helpers; no string interpolation of user-supplied values. `child_process.execFile('sqlite3', …)` is used (not `exec`) so the command is array-form and not subject to shell parsing.
 - **SSE stream**: the `/api/rtk/stream` endpoint holds connections open; a `req.on('close')` handler removes the client from `sseClients` to avoid leaks. No inbound user input is reflected back in the stream payload.
 
@@ -121,11 +122,22 @@ The system also depends on the **`sqlite3` CLI** being on `PATH` (not a Node dep
 
 ## 5. Testing
 
-- No tests today. The natural target is Vitest with no DOM dependency, covering the pure functions:
-  - `formatCurrency`, `formatNumber`, `formatCompactNumber`, `formatTimeRemaining`
+- `npm test` runs the Vitest suite: 15 files, 119 tests, ~415 ms. Coverage includes the pure functions and the modular `lib/` helpers that are importable in Node:
+  - `formatCurrency`, `formatNumber`, `formatCompactNumber`, `formatTimeRemaining` (`lib/format.js`, UMD)
   - The cost / savings / cache-rate calculations (disjoint model, per ADR-0003)
   - The CSV builder
-  - The Brand detection heuristic
-  - `computeApiUsedPct` (percent unit, requests unit, weekly, null-safety)
-  - MiniMax response parsing (mock `https.request`, feed a sample `model_remains` payload, assert the resolved shape)
+  - The Brand detection heuristic (`lib/brand-detect.js`, UMD)
+  - `computeApiUsedPct` and `calcSpendPct` (`lib/quota-utils.js`, UMD; percent unit, requests unit, weekly, null-safety, per-minute skip)
+  - MiniMax response parsing (`lib/brand-fetchers.js` + `tests/fetchMinimaxQuota.test.js`)
+  - Gemini response parsing (`lib/brand-fetchers.js` + `tests/fetchGeminiQuota.test.js`)
+  - `getRtkSpendMetrics` against the live RTK DB (`lib/rtk-metrics.js`)
+  - GLM 5h reset fallback (`lib/brand-fetchers.js` + `tests/reset5hFallback.test.js`)
+  - Antigravity CLI transcript parser (`lib/antigravity-parser.js`, UMD)
+  - `escapeHtml` (`lib/dom-utils.js`, UMD)
+  - LLM-only log feed filter (mirrored from `app.js`)
+  - Monitor-mode switching (mirrored from `app.js`; `getActiveRequests` covers AC-12a/b)
+  - `.env` sibling-preservation round-trip (`lib/env.js` + `tests/envRoundTrip.test.js`; covers AC-21)
+  - `PRICING_DEFAULTS` shape and single-source-of-truth (`lib/pricing-defaults.js` + `tests/pricingDefaults.test.js`)
+- The mirror-function approach is documented at the top of each test file that re-implements a formula. The natural next step is to continue extracting `format*` / `cost*` into the `lib/` tree so the tests can import them directly.
+- CI runs `npm install`, `npm run check` (which covers `lib/*.js` via glob), `npm test`, a `sqlite3 --version` probe, and a server-boot smoke (`/`, `/api/seed-quotas`). See `.github/workflows/ci.yml`.
 - No e2e tests. The dashboard is small enough that the manual acceptance criteria in `REQUIREMENTS.md` are the current contract.

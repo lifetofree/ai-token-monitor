@@ -31,3 +31,5 @@ A Reviewer R5 audit of the pre-populated `SIM_HISTORY_PRELOAD` rows remains open
 ## Why "not yet applied"
 
 The current cost formula uses `billedInput`, and switching to disjoint semantics changes the cost value for any synthetic Request whose `savedTokens` was derived from `inputTokens`. The simulator and the pre-populated mock history are both still in the subset model. A clean implementation requires regenerating the simulator to emit disjoint fields directly (the `triggerRandomMockRequest` and `generateInitialMockHistory` flows). This is tracked as a code task in `docs/REVIEWS.md` R3.
+
+**Update (R6 re-sync)**: the disjoint model is now applied in code across all four write paths (`addRequest`, `fetchRealRTKData`, `connectRTKStream`, `generateInitialMockHistory`). The pre-populated `SIM_HISTORY_PRELOAD` rows generated before the migration may still look inconsistent in `localStorage` for users who haven't clicked *Reset Data*; that audit is tracked under R5-D2 in `docs/REVIEWS.md` (still open).

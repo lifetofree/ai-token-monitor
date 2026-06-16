@@ -15,7 +15,7 @@ Each Brand has a `Brand Metadata` record containing:
 - `limit5h`: 5-Hour Spend Limit cap, user-configured
 - `limitWeekly`: Weekly Spend Limit cap, user-configured
 
-The fields `meta.limit` and `meta.windowLabel` are **still present in `DEFAULT_BRAND_METADATA` in code** but are no longer conceptually part of the schema; deletion is tracked in `../docs/REVIEWS.md` R3 (see `../docs/adr/0004-fixed-rolling-windows.md`).
+The fields `meta.limit` and `meta.windowLabel` are no longer present in `DEFAULT_BRAND_METADATA` and have been removed from the migration loop in `app.js`; closed in `../docs/REVIEWS.md` R3 (see `../docs/adr/0004-fixed-rolling-windows.md`).
 
 ### 1.2 Request
 
@@ -24,9 +24,9 @@ A Request is one LLM API call as recorded by the dashboard. Fields:
 - `id`: stable string (e.g. `req_…`, `mock_…`)
 - `timestamp`: epoch milliseconds
 - `brand`: one of the four Brand keys
-- `inputTokens`: integer; the billed input (per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; not yet applied in code — see ADR-0003 status)
+- `inputTokens`: integer; the billed input (per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; **applied in code** in all four write paths — see ADR-0003 status)
 - `outputTokens`: integer
-- `savedTokens`: integer; cached input, conceptually disjoint from `inputTokens` (subject to the same caveat)
+- `savedTokens`: integer; cached input, **disjoint from `inputTokens`** (per ADR-0003, applied in code)
 - `cost`: float, computed
 - `savings`: float, computed
 
@@ -65,7 +65,7 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 - "Rates & Limits" edits `Brand Metadata` for all four Brands (input rate, output rate, 5h cap, weekly cap). Invalid inputs (NaN, negative) are rejected; previous values are retained.
 - "API Tokens (Keys)" writes one of four allowed env keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`) to `.env` via a per-key endpoint.
 - API keys are returned masked (`****last4`) from `GET /api/env`. The full key is never sent to the browser.
-- **Known bug** (tracked in `../docs/REVIEWS.md` R3): the per-key writer still drops any `.env` keys outside the four-key whitelist. The author name `RTK_DB_PATH` is no longer relevant (RTK is gone), but the loss-of-custom-config behaviour remains for any other env keys the user adds.
+- The per-key writer **preserves** every `.env` key outside the four-key whitelist on update (it reads the existing `.env` and writes the full map back). `RTK_DB_PATH` and `FIREBASE_*` round-trip. Covered by AC-21 and `tests/envRoundTrip.test.js`; closed in `../docs/REVIEWS.md` R3.
 
 ### 2.5 Export
 
@@ -126,16 +126,15 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 
 ## 4. Known gaps
 
-- No automated tests for the pure functions (cost, savings, cache rate, CSV builder, `computeApiUsedPct`, MiniMax response parsing).
-- No CI pipeline.
+- **Mode switcher missing from UI**: `index.html` has no `<select id="monitor-mode-select">`; `app.js` hardcodes `state.monitorMode = 'real'` and never reads `localStorage.atm_monitor_mode`. AC-12 / R5-U1 / R6-R1 is open. The simulator and `getActiveRequests()` are wired in code; only the UI control and its event handler are missing.
 - `localStorage` only — no cross-restart persistence for Request history.
-- Cache model: the **disjoint model is applied** in `addRequest`, `fetchRealRTKData`, `connectRTKStream`, and `generateInitialMockHistory` per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; the `SIM_HISTORY_PRELOAD` rows pre-dating the migration may still look inconsistent (Reviewer R5 scope).
-- `windowLabel` and `meta.limit` still in `DEFAULT_BRAND_METADATA` — see `../docs/adr/0004-fixed-rolling-windows.md` status and `../docs/REVIEWS.md` R3.
-- Env-var loss bug: per-key writer drops `.env` keys outside the four-key whitelist (now also affects `RTK_DB_PATH`, which Real RTK mode honours) — see `../docs/REVIEWS.md` R3.
+- Cache model: the **disjoint model is applied** in `addRequest`, `fetchRealRTKData`, `connectRTKStream`, and `generateInitialMockHistory` per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; the `SIM_HISTORY_PRELOAD` rows pre-dating the migration may still look inconsistent (Reviewer R5-D2).
 - No historical quota trend chart (only the current snapshot is shown).
 - i18n not in scope (limit labels are English-only).
 - No accessibility audit (keyboard nav, screen reader labels).
 - No error boundary in the UI — a single failed provider-quota fetch silently degrades the dashboard to local-spend view.
+- **Cache-staleness UX (R5-X1)**: when a force-refresh of `brand_quota` fails, the dashboard falls back to the local rolling estimate with no user-visible signal. Tracked in `../docs/SYSTEM_DESIGN.md` §8.
+- **MiniMax field-name fragility (R5-X2)**: defensive parsing tries multiple field-name aliases. A future MiniMax API change could silently break the fetcher. Tracked in `../docs/SYSTEM_DESIGN.md` §8.
 
 ## 5. Out of scope
 
