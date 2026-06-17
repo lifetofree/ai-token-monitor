@@ -6,7 +6,7 @@
 
 ### 1.1 Brand
 
-A Brand is an LLM provider tracked by the dashboard. v1 supports four: `gemini`, `claude`, `minimax`, `glm`. The Brand `antigravity` was removed (see `../docs/adr/0001-drop-antigravity-brand.md`).
+A Brand is an LLM provider tracked by the dashboard. v1 supports five: `gemini`, `claude`, `minimax`, `glm`, `mimo`. The Brand `antigravity` was removed (see `../docs/adr/0001-drop-antigravity-brand.md`).
 
 Each Brand has a `Brand Metadata` record containing:
 - `name`: display name
@@ -23,7 +23,7 @@ A Request is one LLM API call as recorded by the dashboard. Fields:
 
 - `id`: stable string (e.g. `req_…`, `mock_…`)
 - `timestamp`: epoch milliseconds
-- `brand`: one of the four Brand keys
+- `brand`: one of the five Brand keys
 - `inputTokens`: integer; the billed input (per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; not yet applied in code — see ADR-0003 status)
 - `outputTokens`: integer
 - `savedTokens`: integer; cached input, conceptually disjoint from `inputTokens` (subject to the same caveat)
@@ -62,10 +62,10 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 ### 2.4 Pricing configuration
 
 - The "Customize Rates" modal has two tabs: "Rates & Limits" and "API Tokens (Keys)".
-- "Rates & Limits" edits `Brand Metadata` for all four Brands (input rate, output rate, 5h cap, weekly cap). Invalid inputs (NaN, negative) are rejected; previous values are retained.
-- "API Tokens (Keys)" writes one of four allowed env keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`) to `.env` via a per-key endpoint.
+- "Rates & Limits" edits `Brand Metadata` for all five Brands (input rate, output rate, 5h cap, weekly cap). Invalid inputs (NaN, negative) are rejected; previous values are retained.
+- "API Tokens (Keys)" writes one of five allowed env keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`, `MIMO_API_KEY`) to `.env` via a per-key endpoint.
 - API keys are returned masked (`****last4`) from `GET /api/env`. The full key is never sent to the browser.
-- **Known bug** (tracked in `../docs/REVIEWS.md` R3): the per-key writer still drops any `.env` keys outside the four-key whitelist. The author name `RTK_DB_PATH` is no longer relevant (RTK is gone), but the loss-of-custom-config behaviour remains for any other env keys the user adds.
+- **Known bug** (tracked in `../docs/REVIEWS.md` R3): the per-key writer still drops any `.env` keys outside the five-key whitelist. The author name `RTK_DB_PATH` is no longer relevant (RTK is gone), but the loss-of-custom-config behaviour remains for any other env keys the user adds.
 
 ### 2.5 Export
 
@@ -123,6 +123,10 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 | AC-15 | `POST /api/seed-quotas {"force": true}` updates `brand_quota` rows within 3 seconds, and the dashboard re-renders the new values within one 30-second refresh tick | Manual: change a Provider cap externally, force-refresh, observe |
 | AC-16 | On initial load, the Live Request Log Feed contains only commands that pass `detectBrand()` (shell commands such as `curl`, `grep`, `ls` are filtered out of the last-15 window) | Manual: insert one LLM and one shell command via `sqlite3` directly, reload, confirm the feed shows only the LLM command |
 | AC-21 | After `POST /api/env/key?key=ANTHROPIC_API_KEY&value=new`, the `.env` file still contains the previous values of any non-whitelisted key (e.g. `RTK_DB_PATH`, `FIREBASE_URL`) | Vitest: write a multi-key `.env`, call the endpoint, assert all keys round-trip |
+| AC-22 | `POST /api/rtk/ingest` with a valid body (`original_cmd` + token counts) returns 200 and a JSON object with `success: true`, `id: <number>`, `command: <row>`, and `broadcast: true` | Vitest: build a valid payload, assert the response shape |
+| AC-23 | `POST /api/rtk/ingest` coerces numeric fields (default 0), computes the default `savings_pct` from the disjoint formula `saved / (input + saved) * 100`, and clamps `savings_pct` to `[0, 100]` | Vitest: assert SQL row order and float format |
+| AC-24 | `POST /api/rtk/ingest` accepts an optional client-supplied `id`; on duplicate, returns 409 with `{"success":false,"error":"Command with this id already exists","id":…}` | Vitest: insert twice with the same id, assert 409 |
+| AC-25 | `POST /api/rtk/ingest` escapes single quotes in `original_cmd` (canonical SQL-injection attempt: `claude ' OR 1=1; DROP TABLE commands; --`); the malicious payload must remain inside a single SQL string literal | Vitest: assert the SQL contains exactly the expected number of semicolons and the doubled quotes |
 
 ## 4. Known gaps
 
@@ -131,7 +135,7 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 - `localStorage` only — no cross-restart persistence for Request history.
 - Cache model: the **disjoint model is applied** in `addRequest`, `fetchRealRTKData`, `connectRTKStream`, and `generateInitialMockHistory` per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; the `SIM_HISTORY_PRELOAD` rows pre-dating the migration may still look inconsistent (Reviewer R5 scope).
 - `windowLabel` and `meta.limit` still in `DEFAULT_BRAND_METADATA` — see `../docs/adr/0004-fixed-rolling-windows.md` status and `../docs/REVIEWS.md` R3.
-- Env-var loss bug: per-key writer drops `.env` keys outside the four-key whitelist (now also affects `RTK_DB_PATH`, which Real RTK mode honours) — see `../docs/REVIEWS.md` R3.
+- Env-var loss bug: per-key writer drops `.env` keys outside the five-key whitelist (now also affects `RTK_DB_PATH`, which Real RTK mode honours) — see `../docs/REVIEWS.md` R3.
 - No historical quota trend chart (only the current snapshot is shown).
 - i18n not in scope (limit labels are English-only).
 - No accessibility audit (keyboard nav, screen reader labels).
@@ -140,3 +144,9 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 ## 5. Out of scope
 
 - Monthly / all-time historical aggregates (only 5-hour and 7-day rolling windows are exposed).
+- Reconciliation with actual invoice charges (the dashboard never knows what was actually billed).
+- i18n (limit labels are English-only in v1).
+- Mobile / responsive layout beyond a desktop browser.
+- Multi-user, multi-tenant, authentication.
+- Network exposure; the dashboard runs on `localhost:3000` only.
+- Kill-switch / auto-throttle when a limit is breached (v1 is monitor-only).

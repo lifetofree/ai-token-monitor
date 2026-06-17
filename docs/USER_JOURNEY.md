@@ -74,6 +74,31 @@ This is the user explicitly checking the **provider-authoritative** view — the
 - Observe the command instantly appearing in the "Live Request Log Feed" console.
 - Confirm the corresponding Brand card's 5-Hour and Weekly bars increment, reflecting the new spend and tokens.
 
+### "I want my other project's LLM usage to count toward this dashboard."
+
+- In the other project, after each LLM call, `POST` to `http://localhost:3000/api/rtk/ingest` with a JSON body that mirrors the RTK `commands` schema:
+  ```bash
+  curl -X POST http://localhost:3000/api/rtk/ingest \
+    -H "Content-Type: application/json" \
+    -d '{
+      "original_cmd": "my-project: claude chat \"summarise docs\"",
+      "brand": "claude",
+      "input_tokens":  1234,
+      "output_tokens": 256,
+      "saved_tokens":  100,
+      "exec_time_ms":  842,
+      "project_path": "/path/to/my-project"
+    }'
+  ```
+- The row is INSERTed into the live RTK DB and broadcast over SSE; the dashboard updates within ~1 s without waiting for the 30 s refresh tick.
+- Brand attribution is automatic via `detectBrand(original_cmd)` — include a brand keyword (`claude`, `gemini`, `minimax`, `glm`, `anthropic`, `google-generative`, `genai`, `zhipu`) in the command text. Alternatively, pass an explicit `brand` field to override detection. Shell-only commands are filtered out.
+- Optional `id` for idempotency: re-sending the same `id` returns 409 instead of double-counting. Optional `timestamp` (ISO 8601) and `exec_time_ms`; both default sensibly.
+- No auth — the loopback CORS allowlist is the trust boundary. The endpoint is only callable from `localhost`.
+
+### "I want to check the dashboard's health."
+
+- `GET /api/diagnostics` returns a JSON object with `uptime`, `brandQuotaCacheAgeMs`, and per-brand `unit` / `error` fields — useful for confirming the quota fetchers are working and the cache is fresh.
+
 ## UI design system
 
 ### Layout
@@ -112,4 +137,4 @@ This is the user explicitly checking the **provider-authoritative** view — the
 
 - **Empty Request store**: cards and table show zeros; console log shows a single "System initialized. Awaiting API request stream..." line. The simulator pre-populates 40 mock requests on first load to avoid this state.
 - **Failed `GET /api/env`**: API key inputs render empty; the user can still type and save.
-- **No other external fetches**: the dashboard no longer polls RTK (see `../docs/adr/0005-remove-real-rtk-mode.md`); the only network call is `GET /api/env` on load. **Known gap**: no user-facing error boundary.
+- **SSE stream disconnected**: the console status dot turns yellow; the dashboard continues to work with stale data and retries on the next refresh tick. No user-facing error boundary.

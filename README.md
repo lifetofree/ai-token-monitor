@@ -61,7 +61,7 @@ Three primary metrics drive cost and savings across every Request:
 
 ### 2. Dual Monitor Mode
 A mode switcher in the header picks one of:
-- **Real RTK Monitor** *(default)* — reads `~/Library/Application Support/rtk/history.db`. New commands surface in the Live Request Log Feed within seconds via a Server-Sent Events stream (`GET /api/rtk/stream`). Brand attribution uses a `detectBrand()` heuristic over the command text.
+- **Real RTK Monitor** *(default)* — reads `~/Library/Application Support/rtk/history.db`. New commands surface in the Live Request Log Feed within seconds via a Server-Sent Events stream (`GET /api/rtk/stream`). Brand attribution uses a `detectBrand()` heuristic over the command text. **Custom-project ingest** — any other project on this machine can `POST /api/rtk/ingest` with an RTK-shaped body (`original_cmd`, `input_tokens`, `output_tokens`, `saved_tokens`, optional `timestamp` / `exec_time_ms` / `id`); the row is inserted, broadcast over SSE, and counted like any other RTK command.
 - **Simulation** — generates synthetic traffic every 8–20 s with randomised input/output token counts and cache hit rates.
 
 Real RTK mode was briefly removed (see `0005`) and re-introduced in [`docs/adr/0006-reintroduce-real-rtk-mode.md`](./docs/adr/0006-reintroduce-real-rtk-mode.md) when the local-spend-only view proved insufficient for multi-tool workflows. `Request.source ∈ {'real', 'sim'}` is now a meaningful field.
@@ -155,12 +155,15 @@ All `original_cmd` text goes through `escapeHtml` before insertion into the DOM 
 | `GET` | `/api/rtk` | Snapshot of RTK commands (supports `?since=<id>` for incremental) |
 | `GET` | `/api/rtk/summary` | Aggregated totals from RTK |
 | `GET` | `/api/rtk/stream` | SSE stream of new RTK commands |
+| `POST` | `/api/rtk/ingest` | Ingest a single RTK-shaped command from a non-RTK client. Accepts optional `brand` field (`claude`, `gemini`, `minimax`, `glm`) to override keyword-based brand detection. Mirrors the `commands` schema 1:1; broadcasts via SSE. No auth (loopback CORS allowlist). |
+| `GET` | `/api/rtk/projects` | Per-project 7-day spend breakdown (brand + token counts + cost) |
 | `GET` | `/api/agent-usage` | Agent session rollups (Antigravity CLI transcripts), `total` / `5h` / `weekly` |
 | `GET` | `/api/seed-quotas` | Brand quota cache (auto-refreshes on stale `reset_at`) |
-| `POST` | `/api/seed-quotas` | Force-refresh the brand quota cache; also triggers the Firebase PUT for the ESP32 mirror |
+| `POST` | `/api/seed-quotas` | Force-refresh the brand quota cache; triggers the Firebase PUT for the ESP32 mirror via the caller |
 | `GET` | `/api/env` | Masked API keys from `.env` |
 | `POST` | `/api/env` | Update any of the whitelisted `.env` keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`) |
 | `POST` | `/api/env/key?key=…` | Update a single whitelisted `.env` key (returns masked) |
+| `GET` | `/api/diagnostics` | Self-test: uptime, brand quota cache age, per-brand unit and error status |
 | `GET` | `/` (and whitelisted statics) | `index.html`, `app.js`, `styles.css`, `package.json`, `favicon.svg` |
 
 See [`docs/SYSTEM_DESIGN.md`](./docs/SYSTEM_DESIGN.md) for full contracts and [`docs/TECH_STACK.md`](./docs/TECH_STACK.md) for the security baseline.
@@ -270,6 +273,7 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 
 ### Recently Closed
 
+- **Custom-project ingest endpoint** — `POST /api/rtk/ingest` accepts an RTK-shaped command from any project on this machine, mirrors the `commands` schema 1:1, INSERTs into the live DB, and broadcasts via SSE so the dashboard updates in real time. `tests/ingest.test.js` (21 tests) covers validation, coercion, disjoint defaults, and SQL-injection protection. AC-22..25. Logged in `docs/REVIEWS.md` R7.
 - **ESP32 color-TFT companion display** — Arduino sketch mirrors the dashboard to Firebase; 240×280 ST7789 full-color card per brand; brand colors match web dark-mode palette; progress bar and stats row match web dashboard semantics; button short/long press for page cycling and auto-rotate.
 - **Firebase publisher** — `publishToFirebase()` puts a sanitized snapshot to `/display.json` after every `seedBrandQuotas()` pass; timestamps converted ms→s so ESP32 `time(nullptr)` comparisons are correct; ESP32 polls every 30 s.
 - **ESP32 timestamp fix** — `reset_at` / `reset_at_weekly` now written in seconds (÷1000 from JS epoch ms) so the firmware's `getResetString()` and `formatAbsoluteReset()` show correct countdowns and clock times instead of a 55,000-year future value.

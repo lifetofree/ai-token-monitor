@@ -147,3 +147,44 @@ This pass covers the four features that landed since R4: Real RTK Monitor Mode r
 | ❌ Regression | 0 | — |
 
 R3 is now **partially closed** (cache model is applied; the `meta.limit` / `windowLabel` cleanups are still open; env-var-loss is open and now also affects `RTK_DB_PATH`).
+
+---
+
+## R7 — `POST /api/rtk/ingest` (custom-project ingest)
+
+This pass adds a single-command ingest endpoint so any other project on this machine can have its LLM usage count toward this dashboard, without having to install RTK or share the SQLite file.
+
+### R7-API1 — Endpoint shape
+- **What was checked**: the request body must mirror the RTK `commands` schema 1:1 (`id` (optional), `timestamp` (optional, ISO 8601), `original_cmd` (required, non-empty string), `input_tokens`, `output_tokens`, `saved_tokens`, `exec_time_ms`). Brand is derived server-side via `detectBrand(original_cmd)`.
+- **What was found**: ✅ `server.js` adds `POST /api/rtk/ingest`. Required: `original_cmd` (string). Optional: `id` (integer, idempotency), `timestamp` (string, defaults to `new Date().toISOString()`), the three token counts (default 0), `exec_time_ms` (default 0), `savings_pct` (default = `saved / (input + saved) * 100`, the disjoint formula). Validates with `Number.isFinite` + `Math.max(0, …)`; escapes with the existing `escapeSQLString` / `escapeSQLNumber` / `escapeSQLFloat` helpers from `lib/quota-cache.js`.
+- **Action**: none.
+
+### R7-API2 — SQL-injection protection
+- **What was checked**: a malicious `original_cmd` (e.g. `claude ' OR 1=1; DROP TABLE commands; --`) must not break out of the quoted string or inject a second statement.
+- **What was found**: ✅ `escapeSQLString` doubles single quotes; the entire payload is a single SQL string literal. `tests/ingest.test.js` covers the canonical injection attempt and asserts the SQL contains exactly three semicolons (the two inside the quoted string + the trailing `;` terminator). Token fields are validated as finite numbers before any stringification; injection payloads in numeric fields are dropped (and the test pins this behaviour).
+- **Action**: none.
+
+### R7-API3 — Idempotency on client-supplied `id`
+- **What was checked**: a retry or duplicate POST should not double-count.
+- **What was found**: ✅ if the client supplies `id`, the SQL includes it in the column list; a PK conflict returns 409 with `{"success":false,"error":"Command with this id already exists","id":…}`. If the client omits `id`, SQLite auto-assigns one and the response returns the new id (read back via `WHERE timestamp = ? AND original_cmd = ? ORDER BY id DESC LIMIT 1`).
+- **Action**: none.
+
+### R7-API4 — Real-time broadcast via SSE
+- **What was checked**: a successful POST should make the new row appear in the live dashboard within ~1 s, not only on the next 30 s tick.
+- **What was found**: ✅ after a successful INSERT and read-back, the row is broadcast to all open SSE clients via `broadcastToClients()` (now exported from `lib/sse-watcher.js`). The client receives a `data: <row>\n\n` event in the same shape as `fs.watch()`-driven updates, so `connectRTKStream()` in `app.js` picks it up with no code change. The response includes `broadcast: true|false` so callers can confirm whether the live feed received it.
+- **Action**: none.
+
+### R7-API5 — Test coverage
+- **What was checked**: validation, coercion, SQL injection, and broadcast trigger must be unit-tested.
+- **What was found**: ✅ `tests/ingest.test.js` (21 tests): validation (5), coercion & defaults (7), SQL injection (4), broadcast trigger (2), well-formed INSERT (1), disjoint invariant (1), missing id (1). All pass; total suite is now **16 files, 140 tests**, ~620 ms.
+- **Action**: none.
+
+### R7 summary
+
+| Severity | Count | Items |
+|---|---|---|
+| ✅ Pass | 5 | R7-API1 (shape), R7-API2 (SQL injection), R7-API3 (idempotency), R7-API4 (SSE broadcast), R7-API5 (test coverage) |
+| ❌ Regression | 0 | — |
+| ⚠️ Documented gap | 0 | — |
+
+`POST /api/rtk/ingest` is now the canonical path for non-RTK projects on this machine to contribute usage to the dashboard. RTK itself remains the default path for shell-wrapped calls.
