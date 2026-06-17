@@ -30,6 +30,7 @@
   --color-claude: #ea580c;
   --color-minimax: #0891b2;
   --color-glm: #16a34a;
+  --color-mimo: #e11d48;
 }
 
 [data-theme="dark"] {
@@ -57,6 +58,7 @@
   --color-claude: #f97316;
   --color-minimax: #22d3ee;
   --color-glm: #4ade80;
+  --color-mimo: #fb7185;
 }
 
 * {
@@ -830,6 +832,82 @@ select:focus,
 [data-theme="dark"] select,
 [data-theme="dark"] .form-group-row select {
   background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+
+/* Projects breakdown table */
+.projects-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.projects-table th,
+.projects-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.projects-table th {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.project-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-summary-row {
+  font-weight: 600;
+  background: var(--bg-card);
+}
+.project-summary-row td {
+  border-bottom: 2px solid var(--border);
+}
+.project-brand-row td {
+  padding-left: 28px;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.project-brand-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.project-cost-cell {
+  position: relative;
+}
+.project-cost-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--primary);
+  opacity: 0.10;
+  border-radius: 0 2px 2px 0;
+  z-index: 0;
+}
+.project-cost-cell {
+  position: relative;
+  z-index: 1;
+}
+.cache-rate-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-main);
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+.project-expand-icon {
+  font-size: 9px;
+  margin-right: 4px;
+  opacity: 0.5;
 }
 
 

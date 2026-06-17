@@ -1,3 +1,6 @@
+process.on('uncaughtException', (e) => { console.error('[FATAL] uncaughtException:', e); });
+process.on('unhandledRejection', (e) => { console.error('[UNHANDLED] unhandledRejection:', e); });
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -8,7 +11,7 @@ const { getRtkSpendMetrics } = require('./lib/rtk-metrics');
 const { publishToFirebase } = require('./lib/firebase');
 const { loadEnv, maskSecret, handleGetEnv, handlePostEnvKey, handlePostEnv } = require('./lib/env');
 const { DB_PATH, escapeSQLString, escapeSQLNumber, escapeSQLFloat, ensureBrandQuotaTable, readBrandQuotaRows, writeBrandQuotaRow, isCacheValid } = require('./lib/quota-cache');
-const { addSseClient, removeSseClient, initWatcher } = require('./lib/sse-watcher');
+const { addSseClient, removeSseClient, broadcastToClients, initWatcher } = require('./lib/sse-watcher');
 
 const PORT = 3000;
 const STATIC_ROOT = path.resolve(__dirname);
@@ -43,7 +46,7 @@ const server = http.createServer((req, res) => {
     const urlObj = new URL(req.url, `http://localhost:${PORT}`);
     const sinceId = parseInt(urlObj.searchParams.get('since') || '0', 10) || 0;
     const whereClause = sinceId > 0 ? `WHERE id > ${sinceId}` : '';
-    const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms FROM commands ${whereClause} ORDER BY id ASC LIMIT 1000`;
+    const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path FROM commands ${whereClause} ORDER BY id ASC LIMIT 1000`;
 
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -81,6 +84,25 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // API Endpoint: Per-project 7-day spend breakdown
+  if (req.method === 'GET' && req.url === '/api/rtk/projects') {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+    // Return all projects with a non-empty project_path. Brand is resolved
+    // client-side via detectBrand(original_cmd) when the column is empty.
+    // We return a sample original_cmd per group so the client can attribute brand.
+    const query = `SELECT project_path AS project, brand, COUNT(*) AS requests, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(saved_tokens) AS saved_tokens, (SELECT original_cmd FROM commands c2 WHERE c2.project_path = commands.project_path AND c2.timestamp >= ${escapeSQLString(sevenDaysAgo)} AND (c2.input_tokens > 0 OR c2.output_tokens > 0) LIMIT 1) AS sample_cmd FROM commands WHERE timestamp >= ${escapeSQLString(sevenDaysAgo)} AND project_path != '' GROUP BY project_path, brand ORDER BY project_path, brand`;
+    execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (error || !stdout.trim()) {
+        res.end(JSON.stringify({ projects: [] }));
+        return;
+      }
+      try { res.end(JSON.stringify({ projects: JSON.parse(stdout) })); }
+      catch (e) { res.end(JSON.stringify({ projects: [] })); }
+    });
+    return;
+  }
+
   // API Endpoint: Server-Sent Events stream for Real-Time updates
   if (req.method === 'GET' && req.url === '/api/rtk/stream') {
     const allowedSseOrigin = (!origin || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1'))
@@ -104,6 +126,109 @@ const server = http.createServer((req, res) => {
     
     req.on('close', () => {
       removeSseClient(res);
+    });
+    return;
+  }
+
+  // API Endpoint: Ingest a single RTK-shaped command from a non-RTK client
+  // (e.g. another project on this machine that wants its LLM usage to count
+  // toward this dashboard). Mirrors the RTK `commands` schema 1:1 and
+  // broadcasts the new row to all SSE clients so the live dashboard updates
+  // within ~1 s. No auth — the loopback CORS allowlist is the trust boundary.
+  if (req.method === 'POST' && req.url === '/api/rtk/ingest') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      let payload;
+      try {
+        payload = body.trim() ? JSON.parse(body) : {};
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      // Required field
+      if (typeof payload.original_cmd !== 'string' || payload.original_cmd.trim() === '') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'original_cmd is required (non-empty string)' }));
+        return;
+      }
+
+      // Coerce / default. Token counts are non-negative integers; timestamps
+      // default to "now" in ISO 8601; savings_pct defaults to the disjoint
+      // formula (saved / (input + saved) * 100, or 0 if both are zero).
+      const originalCmd = String(payload.original_cmd);
+      const inputTokens  = Number.isFinite(payload.input_tokens)  ? Math.max(0, parseInt(payload.input_tokens, 10))  : 0;
+      const outputTokens = Number.isFinite(payload.output_tokens) ? Math.max(0, parseInt(payload.output_tokens, 10)) : 0;
+      const savedTokens  = Number.isFinite(payload.saved_tokens)  ? Math.max(0, parseInt(payload.saved_tokens, 10))  : 0;
+      const execTimeMs   = Number.isFinite(payload.exec_time_ms)  ? Math.max(0, parseInt(payload.exec_time_ms, 10))  : 0;
+      const timestamp    = (typeof payload.timestamp === 'string' && payload.timestamp.trim())
+        ? payload.timestamp.trim()
+        : new Date().toISOString();
+      // RTK schema requires NOT NULL on rtk_cmd. Custom ingests have no
+      // RTK-side command; default to '' (empty) unless the client supplies
+      // one. project_path defaults to '' to match the schema's column default.
+      const rtkCmd = (typeof payload.rtk_cmd === 'string') ? payload.rtk_cmd : '';
+      const projectPath = (typeof payload.project_path === 'string') ? payload.project_path : '';
+      const VALID_BRANDS = ['claude', 'gemini', 'minimax', 'glm', 'mimo'];
+      const brandHint = (typeof payload.brand === 'string'
+        && VALID_BRANDS.includes(payload.brand.toLowerCase()))
+        ? payload.brand.toLowerCase()
+        : '';
+      const total = inputTokens + savedTokens;
+      const savingsPct = Number.isFinite(payload.savings_pct)
+        ? Math.max(0, Math.min(100, parseFloat(payload.savings_pct)))
+        : (total > 0 ? (savedTokens / total) * 100 : 0);
+
+      // Optional client-supplied id for idempotency. If a row with that id
+      // already exists, the INSERT will fail (PK conflict) and we return 409.
+      const clientId = Number.isFinite(payload.id) ? parseInt(payload.id, 10) : null;
+      const idClause = clientId !== null ? `${clientId}, ` : '';
+
+      const insertSql = `INSERT INTO commands (${idClause}timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path, brand) VALUES (${escapeSQLString(timestamp)}, ${escapeSQLString(originalCmd)}, ${escapeSQLString(rtkCmd)}, ${escapeSQLNumber(inputTokens)}, ${escapeSQLNumber(outputTokens)}, ${escapeSQLNumber(savedTokens)}, ${escapeSQLFloat(savingsPct)}, ${escapeSQLNumber(execTimeMs)}, ${escapeSQLString(projectPath)}, ${escapeSQLString(brandHint)});`;
+
+      execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, insertSql], (insertErr) => {
+        if (insertErr) {
+          // PK conflict → row already exists
+          if (clientId !== null && /UNIQUE constraint failed: commands\.id/i.test(insertErr.message)) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Command with this id already exists', id: clientId }));
+            return;
+          }
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: insertErr.message }));
+          return;
+        }
+
+        // Read back the inserted row. If the client supplied an id, fetch by
+        // id; otherwise look up the last row matching the timestamp + cmd
+        // (rare race, but bounded to the just-inserted row in practice).
+        const lookupSql = clientId !== null
+          ? `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path, brand FROM commands WHERE id = ${clientId}`
+          : `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path, brand FROM commands WHERE timestamp = ${escapeSQLString(timestamp)} AND original_cmd = ${escapeSQLString(originalCmd)} ORDER BY id DESC LIMIT 1`;
+
+        execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, lookupSql], (lookupErr, lookupStdout) => {
+          if (lookupErr || !lookupStdout.trim()) {
+            // Insert succeeded but we couldn't read back — return success without broadcast
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, id: clientId, broadcast: false }));
+            return;
+          }
+          try {
+            const rows = JSON.parse(lookupStdout);
+            const row = rows[0];
+            if (row) {
+              broadcastToClients(row);
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, id: row ? row.id : clientId, command: row || null, broadcast: !!row }));
+          } catch (e) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, id: clientId, broadcast: false }));
+          }
+        });
+      });
     });
     return;
   }
@@ -151,6 +276,7 @@ const server = http.createServer((req, res) => {
         const parsed = body.trim() ? JSON.parse(body) : {};
         const force = !!parsed.force;
         const out = await seedBrandQuotas(force);
+        publishToFirebase(out.results, out.env, out.rtkSpend).catch(e => console.error('[firebase]', e?.message));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, ...out }));
       } catch (e) {
@@ -205,6 +331,33 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // API Endpoint: Diagnostics — self-test for KPI measurement
+  if (req.method === 'GET' && req.url === '/api/diagnostics') {
+    const now = Date.now();
+    const diag = {
+      uptime: Math.round(process.uptime()),
+      lastRefreshMs: now,
+      brandQuotaCacheAgeMs: null,
+      brandQuotas: {}
+    };
+    readBrandQuotaRows().then(rows => {
+      for (const r of rows) {
+        diag.brandQuotas[r.brand] = {
+          cached: !!r.seeded_at,
+          ageMs: r.seeded_at ? now - r.seeded_at : null,
+          unit: r.unit,
+          error: r.error || null
+        };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(diag));
+    }).catch(() => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(diag));
+    });
+    return;
+  }
+
   // Static Assets Handler — path traversal protected AND whitelisted
   const urlPath = req.url === '/' ? 'index.html' : req.url.split('?')[0];
   const filePath = path.resolve(STATIC_ROOT, urlPath.replace(/^\/+/, ''));
@@ -243,15 +396,17 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`AI Token Monitor running at http://localhost:${PORT}/`);
   initWatcher(DB_PATH);
   ensureBrandQuotaTable();
+  ensureBrandColumn();
   ensureAgentUsageTable();
   syncAgentUsage();
   setInterval(syncAgentUsage, 2 * 60 * 1000);
   seedBrandQuotas(false).then(out => {
     console.log(`Brand-quota seed (${out.cached ? 'cached' : 'fetched'}): ${out.results.length} records`);
+    publishToFirebase(out.results, out.env, out.rtkSpend).catch(e => console.error('[firebase]', e?.message));
   }).catch(err => {
     console.error('Initial brand-quota seed failed:', err);
   });
@@ -261,6 +416,15 @@ server.listen(PORT, () => {
     exec(`${startCmd} http://localhost:${PORT}`);
   } catch (e) {}
 });
+
+function ensureBrandColumn() {
+  const query = `ALTER TABLE commands ADD COLUMN brand TEXT DEFAULT '';`;
+  execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
+    if (error && !/duplicate column name/i.test(error.message)) {
+      console.error('Failed to add brand column:', error);
+    }
+  });
+}
 
 function ensureAgentUsageTable() {
   const query = `CREATE TABLE IF NOT EXISTS agent_usage (
@@ -406,8 +570,5 @@ async function seedBrandQuotas(force) {
     results.push(row);
   }
 
-  // Push to Firebase for ESP32 companion — await so the PUT completes before returning.
-  await publishToFirebase(results, env, rtkSpend).catch(e => console.error('[firebase]', e?.message));
-
-  return { cached: false, results, forced: force };
+  return { cached: false, results, forced: force, env, rtkSpend };
 }

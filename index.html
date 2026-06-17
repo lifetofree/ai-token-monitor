@@ -94,6 +94,15 @@
       </section>
 
 
+      <!-- Projects Breakdown (shown only when custom ingests exist) -->
+      <section id="projects-section" class="table-section" style="display:none; margin-top: 24px;" aria-label="Per-Project Usage">
+        <div class="chart-panel-header">
+          <h2 class="chart-panel-title">Usage by Project (7-day)</h2>
+        </div>
+        <div class="table-wrapper" id="projects-table-container"></div>
+      </section>
+
+
       <!-- Bottom Grid: Detailed Table -->
       <section class="table-section" style="margin-top: 24px;" aria-label="Detailed Brand Usage Table">
         <div class="chart-panel-header">
@@ -195,6 +204,10 @@
               <div class="form-group-row">
                 <label for="token-minimax">MINIMAX_API_KEY</label>
                 <input type="password" id="token-minimax" placeholder="Your Minimax Key">
+              </div>
+              <div class="form-group-row">
+                <label for="token-mimo">MIMO_API_KEY</label>
+                <input type="password" id="token-mimo" placeholder="Your MiMo Key">
               </div>
             </div>
           </div>

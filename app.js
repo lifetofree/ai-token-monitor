@@ -25,7 +25,8 @@ const DEFAULT_BRAND_METADATA = window.PRICING_DEFAULTS || {
   gemini:  { name: 'Antigravity', inputCost: 1.25, outputCost: 5.00,  color: 'var(--color-gemini)',  limit5h: 2.00, limitWeekly: 15.00 },
   claude:  { name: 'Claude',      inputCost: 3.00, outputCost: 15.00, color: 'var(--color-claude)',  limit5h: 5.00, limitWeekly: 30.00 },
   minimax: { name: 'Minimax',     inputCost: 1.00, outputCost: 4.00,  color: 'var(--color-minimax)', limit5h: 2.00, limitWeekly: 15.00 },
-  glm:     { name: 'GLM',         inputCost: 0.50, outputCost: 2.00,  color: 'var(--color-glm)',     limit5h: 0.80, limitWeekly:  6.00 }
+  glm:     { name: 'GLM',         inputCost: 0.50, outputCost: 2.00,  color: 'var(--color-glm)',     limit5h: 0.80, limitWeekly:  6.00 },
+  mimo:    { name: 'MiMo',        inputCost: 1.00, outputCost: 4.00,  color: 'var(--color-mimo)',    limit5h: 2.00, limitWeekly: 15.00 }
 };
 if (!window.PRICING_DEFAULTS) {
   console.warn('[ai-token-monitor] lib/pricing-defaults.js did not load; using inline fallback. Restart the dev server to pick up the UMD module.');
@@ -140,7 +141,8 @@ function initElements() {
     tokenAnthropic: document.getElementById('token-anthropic'),
     tokenGemini: document.getElementById('token-gemini'),
     tokenGlm: document.getElementById('token-glm'),
-    tokenMinimax: document.getElementById('token-minimax')
+    tokenMinimax: document.getElementById('token-minimax'),
+    tokenMimo: document.getElementById('token-mimo')
   };
 }
 
@@ -167,6 +169,7 @@ function init() {
   fetchAPIKeys();
   fetchBrandQuotas();
   fetchAgentUsage();
+  fetchProjectData();
 
   // Start countdown loops
   startCountdownTimer();
@@ -587,7 +590,7 @@ function renderTable(brandData) {
 function startCountdownTimer() {
   if (refreshTimerIntervalId) clearInterval(refreshTimerIntervalId);
   
-  refreshTimer = REFRESH_INTERVAL_SECONDS;
+  refreshTimer = getRefreshInterval();
   updateTimerUI();
   
   refreshTimerIntervalId = setInterval(() => {
@@ -598,10 +601,33 @@ function startCountdownTimer() {
       fetchRealRTKData();
       fetchBrandQuotas();
       fetchAgentUsage();
+      fetchProjectData();
       stampLastUpdated();
-      refreshTimer = REFRESH_INTERVAL_SECONDS;
+      scheduleDashboardRender();
+      refreshTimer = getRefreshInterval();
     }
   }, 1000);
+}
+
+function getRefreshInterval() {
+  // Progressive refresh: when any brand is >80% on 5h bar, refresh every 10s
+  if (state.brandQuotas) {
+    for (const brand of Object.keys(state.brandMetadata)) {
+      const q = state.brandQuotas[brand];
+      if (!q) continue;
+      const meta = state.brandMetadata[brand];
+      const limit5h = meta.limit5h > 0 ? meta.limit5h : 2.00;
+      // Use spend % for RTK-based brands, API used % for percent-based
+      let pct = 0;
+      if (q.unit === 'percent' && typeof q.remaining === 'number') {
+        pct = Math.max(0, 100 - q.remaining);
+      } else if (q.unit === 'requests' && typeof q.remaining === 'number' && typeof q.limit_value === 'number' && q.limit_value > 0) {
+        pct = ((q.limit_value - q.remaining) / q.limit_value) * 100;
+      }
+      if (pct > 80) return 10;
+    }
+  }
+  return REFRESH_INTERVAL_SECONDS;
 }
 
 function stampLastUpdated() {
@@ -612,10 +638,11 @@ function stampLastUpdated() {
 }
 
 function updateTimerUI() {
+  const total = getRefreshInterval();
   elements.timerText.textContent = `Refreshes in ${refreshTimer}s`;
 
   // Circle stroke math (total stroke size is ~44px)
-  const offset = 44 - (44 * (refreshTimer / REFRESH_INTERVAL_SECONDS));
+  const offset = 44 - (44 * (refreshTimer / total));
   elements.timerProgressRing.style.strokeDashoffset = offset;
 }
 
@@ -870,7 +897,8 @@ function setupEventListeners() {
       { name: 'ANTHROPIC_API_KEY', value: elements.tokenAnthropic.value.trim() },
       { name: 'GEMINI_API_KEY', value: elements.tokenGemini.value.trim() },
       { name: 'GLM_API_KEY', value: elements.tokenGlm.value.trim() },
-      { name: 'MINIMAX_API_KEY', value: elements.tokenMinimax.value.trim() }
+      { name: 'MINIMAX_API_KEY', value: elements.tokenMinimax.value.trim() },
+      { name: 'MIMO_API_KEY', value: elements.tokenMimo ? elements.tokenMimo.value.trim() : '' }
     ];
 
     Promise.all(keyUpdates.map(k =>
@@ -1067,6 +1095,7 @@ function fetchAPIKeys() {
       if (data.GEMINI_API_KEY && elements.tokenGemini) elements.tokenGemini.value = data.GEMINI_API_KEY;
       if (data.GLM_API_KEY && elements.tokenGlm) elements.tokenGlm.value = data.GLM_API_KEY;
       if (data.MINIMAX_API_KEY && elements.tokenMinimax) elements.tokenMinimax.value = data.MINIMAX_API_KEY;
+      if (data.MIMO_API_KEY && elements.tokenMimo) elements.tokenMimo.value = data.MIMO_API_KEY;
     })
     .catch(err => console.error('Failed to load local API keys from backend:', err));
 }
@@ -1086,7 +1115,7 @@ function fetchBrandQuotas() {
           }
           state.brandQuotas[q.brand] = q;
         });
-        calculateAndRenderDashboard();
+        scheduleDashboardRender();
       }
     })
     .catch(err => {
@@ -1102,11 +1131,122 @@ function fetchAgentUsage() {
     })
     .then(data => {
       state.agentUsage = data;
-      calculateAndRenderDashboard();
+      scheduleDashboardRender();
     })
     .catch(err => {
       console.warn('Failed to fetch agent usage:', err);
     });
+}
+
+function fetchProjectData() {
+  fetch('/api/rtk/projects')
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      renderProjectBreakdown(data.projects || []);
+    })
+    .catch(err => {
+      console.warn('Failed to fetch project data:', err);
+    });
+}
+
+function renderProjectBreakdown(projects) {
+  const container = document.getElementById('projects-table-container');
+  const section   = document.getElementById('projects-section');
+  if (!container || !section) return;
+
+  if (!projects || projects.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+
+  // Group by project
+  const grouped = {};
+  for (const p of projects) {
+    if (!grouped[p.project]) grouped[p.project] = [];
+    grouped[p.project].push(p);
+  }
+
+  // Compute per-project totals for sorting and bar scaling
+  const projectTotals = Object.entries(grouped).map(([project, rows]) => {
+    let totalCost = 0, totalSavings = 0, totalInput = 0, totalOutput = 0, totalSaved = 0, totalReqs = 0;
+    for (const r of rows) {
+      const resolvedBrand = r.brand || (r.sample_cmd ? detectBrand(r.sample_cmd) : '') || '';
+      const meta = (window.PRICING_DEFAULTS || {})[resolvedBrand] || {};
+      const cost = ((r.input_tokens * (meta.inputCost || 0)) + (r.output_tokens * (meta.outputCost || 0))) / 1000000;
+      const savings = ((r.saved_tokens || 0) * (meta.inputCost || 0)) / 1000000;
+      totalCost += cost;
+      totalSavings += savings;
+      totalInput += r.input_tokens;
+      totalOutput += r.output_tokens;
+      totalSaved += r.saved_tokens || 0;
+      totalReqs += r.requests;
+    }
+    return { project, rows, totalCost, totalSavings, totalInput, totalOutput, totalSaved, totalReqs };
+  });
+
+  // Sort by cost descending
+  projectTotals.sort((a, b) => b.totalCost - a.totalCost);
+  const maxCost = projectTotals[0]?.totalCost || 1;
+
+  const rows = projectTotals.map(pt => {
+    const shortP = pt.project.split('/').filter(Boolean).slice(-2).join('/');
+    const barWidth = Math.max(2, (pt.totalCost / maxCost) * 100);
+    const totalTokens = pt.totalInput + pt.totalOutput;
+    const cacheRate = (pt.totalInput + pt.totalSaved) > 0
+      ? ((pt.totalSaved / (pt.totalInput + pt.totalSaved)) * 100).toFixed(0)
+      : '0';
+
+    // Summary row for the project
+    let html = `<tr class="project-summary-row">
+      <td class="project-name" title="${escapeHtml(pt.project)}">
+        <span class="project-expand-icon" data-project="${escapeHtml(pt.project)}">&#9660;</span>
+        ${escapeHtml(shortP)}
+      </td>
+      <td class="font-mono-val">${formatNumber(pt.totalReqs)}</td>
+      <td class="font-mono-val">${formatCompactNumber(totalTokens)}</td>
+      <td class="font-mono-val text-success">${formatCompactNumber(pt.totalSaved)} <span class="cache-rate-badge">${cacheRate}%</span></td>
+      <td class="font-mono-val project-cost-cell">
+        <span class="project-cost-bar" style="width: ${barWidth}%;"></span>
+        ${formatCurrency(pt.totalCost)}
+      </td>
+      <td class="font-mono-val savings-highlight">${formatCurrency(pt.totalSavings)}</td>
+    </tr>`;
+
+    // Brand sub-rows
+    for (const r of pt.rows) {
+      const resolvedBrand = r.brand || (r.sample_cmd ? detectBrand(r.sample_cmd) : '') || '';
+      const meta = (window.PRICING_DEFAULTS || {})[resolvedBrand] || {};
+      const cost = ((r.input_tokens * (meta.inputCost || 0)) + (r.output_tokens * (meta.outputCost || 0))) / 1000000;
+      const savings = ((r.saved_tokens || 0) * (meta.inputCost || 0)) / 1000000;
+      const brandTokens = r.input_tokens + r.output_tokens;
+      const brandColor = resolvedBrand ? getBrandColor(resolvedBrand) : 'var(--text-muted)';
+      html += `<tr class="project-brand-row">
+        <td class="project-brand-cell"><span class="badge-brand-dot" style="background-color: ${brandColor}"></span> ${escapeHtml(meta.name || resolvedBrand || '\u2014')}</td>
+        <td class="font-mono-val">${r.requests}</td>
+        <td class="font-mono-val">${formatCompactNumber(brandTokens)}</td>
+        <td class="font-mono-val text-success">${formatCompactNumber(r.saved_tokens || 0)}</td>
+        <td class="font-mono-val">${formatCurrency(cost)}</td>
+        <td class="font-mono-val savings-highlight">${formatCurrency(savings)}</td>
+      </tr>`;
+    }
+
+    return html;
+  }).join('');
+
+  container.innerHTML = `
+    <table class="projects-table">
+      <thead><tr>
+        <th>Project</th><th>Reqs</th>
+        <th>Tokens (7d)</th><th>Saved</th>
+        <th>Cost (7d)</th><th>Savings</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 }
 
 function getActiveRequests() {
@@ -1169,7 +1309,8 @@ function fetchRealRTKData(forceRefresh = false) {
           savedTokens: cmd.saved_tokens,
           cost: parseFloat(cost.toFixed(6)),
           savings: parseFloat(savings.toFixed(6)),
-          cmdText: cmd.original_cmd
+          cmdText: cmd.original_cmd,
+          projectPath: cmd.project_path || ''
         });
 
         // On initial load, log the most recent 15 LLM commands to populate the feed.
@@ -1178,8 +1319,10 @@ function fetchRealRTKData(forceRefresh = false) {
         if (shouldLog) {
           const totalAttempted = cmd.input_tokens + cmd.saved_tokens;
           const savedPercent = totalAttempted > 0 ? ((cmd.saved_tokens / totalAttempted) * 100).toFixed(0) : '0';
+          const projName = cmd.project_path ? cmd.project_path.split('/').filter(Boolean).pop() : '';
+          const projLabel = projName ? `[${projName}] ` : '';
           logEventSafe(meta.name, [
-            { text: '[Real] "' },
+            { text: `[Real] ${projLabel}"` },
             { text: cmd.original_cmd },
             { text: '" | In: ' },
             { text: formatCompactNumber(cmd.input_tokens), cls: 'highlight-tokens' },
@@ -1203,7 +1346,7 @@ function fetchRealRTKData(forceRefresh = false) {
       if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
         state.realCommands = state.realCommands.slice(-MAX_REQUESTS_RETAINED);
       }
-      calculateAndRenderDashboard();
+      scheduleDashboardRender();
     })
     .catch(err => {
       logEvent('SYSTEM', `Failed to connect to RTK backend API: ${err.message}`);
@@ -1250,7 +1393,8 @@ function connectRTKStream() {
         savedTokens: cmd.saved_tokens,
         cost: parseFloat(cost.toFixed(6)),
         savings: parseFloat(savings.toFixed(6)),
-        cmdText: cmd.original_cmd
+        cmdText: cmd.original_cmd,
+        projectPath: cmd.project_path || ''
       };
 
       const exists = state.realCommands.some(r => r.id === newReq.id);
@@ -1262,8 +1406,10 @@ function connectRTKStream() {
 
         const totalAttempted = cmd.input_tokens + cmd.saved_tokens;
         const savedPercent = totalAttempted > 0 ? ((cmd.saved_tokens / totalAttempted) * 100).toFixed(0) : '0';
+        const projName = cmd.project_path ? cmd.project_path.split('/').filter(Boolean).pop() : '';
+        const projLabel = projName ? `[${projName}] ` : '';
         logEventSafe(meta.name, [
-          { text: '[Real-Time] "' },
+          { text: `[Real-Time] ${projLabel}"` },
           { text: cmd.original_cmd },
           { text: '" | In: ' },
           { text: formatCompactNumber(cmd.input_tokens), cls: 'highlight-tokens' },

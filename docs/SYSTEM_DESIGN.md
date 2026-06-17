@@ -9,7 +9,7 @@ A two-process, single-machine system:
 - **Browser process**: `index.html` + `styles.css` + `app.js`. Renders the dashboard; reads/writes `localStorage`; supports both Real RTK Monitor (default) and Simulation modes; consumes the `/api/seed-quotas` snapshot to drive the API-aware progress bars and reset-time badges.
 - **Server process**: `server.js`. Static file server plus **eight** JSON/SSE endpoints across three concerns:
   - **`.env` I/O**: `GET /api/env`, `POST /api/env`, `POST /api/env/key`
-  - **Real RTK Monitor**: `GET /api/rtk` (full snapshot), `GET /api/rtk/summary` (aggregate summary), `GET /api/rtk/stream` (SSE for incremental updates)
+  - **Real RTK Monitor**: `GET /api/rtk` (full snapshot), `GET /api/rtk/summary` (aggregate summary), `GET /api/rtk/stream` (SSE for incremental updates), `POST /api/rtk/ingest` (single-command ingest from non-RTK clients)
   - **Provider-quota cache**: `GET /api/seed-quotas` (cached snapshot), `POST /api/seed-quotas` (force-refresh)
 - **Outbound HTTPS client**: the server's `fetchMinimaxQuota` makes a `GET` to `https://www.minimax.io/v1/token_plan/remains` with `Authorization: Bearer <MINIMAX_API_KEY>`. This is the first outbound integration; no other fetcher makes outbound calls (Claude/GLM read quota from in-band response headers on a probe request).
 
@@ -307,6 +307,61 @@ Force-refreshes the `brand_quota` cache. Body: `{"force": true}`. Calls each Bra
 { "success": true, "cached": false, "results": [...], "forced": true }
 ```
 
+### 4.9 `POST /api/rtk/ingest`
+
+Ingest a single RTK-shaped command from a non-RTK client (any project on this machine that wants its LLM usage to count toward the dashboard). The endpoint mirrors the RTK `commands` schema 1:1, INSERTs the row, and broadcasts it over the existing SSE channel so the live dashboard updates within ~1 s.
+
+**Request body** (JSON):
+
+```json
+{
+  "id": 4711,                                              // optional — for idempotency
+  "timestamp": "2026-06-16T12:34:56.000Z",                 // optional — ISO 8601; defaults to now
+  "original_cmd": "claude code --print 'hello'",           // required — non-empty string
+  "input_tokens":  1234,                                   // optional — non-negative integer; default 0
+  "output_tokens": 256,                                    // optional — non-negative integer; default 0
+  "saved_tokens":  100,                                    // optional — non-negative integer; default 0
+  "exec_time_ms":  842,                                    // optional — non-negative integer; default 0
+  "savings_pct":   7.5                                     // optional — [0, 100]; defaults to saved / (input + saved) * 100
+}
+```
+
+Brand attribution is derived server-side via `detectBrand(original_cmd)`. Token fields are validated with `Number.isFinite` and `Math.max(0, …)`; string values that aren't parseable as numbers default to 0. `original_cmd` and `timestamp` are escaped with `escapeSQLString` (single quotes doubled) so SQL-injection attempts (e.g. `claude ' OR 1=1; DROP TABLE commands; --`) remain inside a single string literal.
+
+**Response (200)**
+
+```json
+{ "success": true, "id": 4711, "command": { ...row... }, "broadcast": true }
+```
+
+**Response (409 — duplicate id)**
+
+```json
+{ "success": false, "error": "Command with this id already exists", "id": 4711 }
+```
+
+**Response (400 — missing or empty `original_cmd`)**
+
+```json
+{ "success": false, "error": "original_cmd is required (non-empty string)" }
+```
+
+**Response (400 — invalid JSON body)**
+
+```json
+{ "success": false, "error": "Invalid JSON body" }
+```
+
+**Response (500 — DB error)**
+
+```json
+{ "success": false, "error": "<sqlite3 stderr>" }
+```
+
+After a successful INSERT the row is broadcast to all open SSE clients via `broadcastToClients()` (exported from `lib/sse-watcher.js`). The `connectRTKStream()` handler in `app.js` picks the event up with no code change because the broadcast payload is the same shape `fs.watch()` produces.
+
+No auth — the loopback CORS allowlist (`http://localhost:*` / `http://127.0.0.1:*`) is the trust boundary. Documented in `docs/REVIEWS.md` R7.
+
 ## 5. Component hierarchy
 
 ### 5.1 Client
@@ -349,6 +404,7 @@ http.createServer()
 ├── GET  /api/rtk              # execFile('sqlite3', …, DB_PATH, query)
 ├── GET  /api/rtk/summary       # execFile(... aggregate query)
 ├── GET  /api/rtk/stream        # SSE; fs.watch() on dbDir
+├── POST /api/rtk/ingest        # INSERT INTO commands + broadcastToClients (R7)
 ├── GET  /api/seed-quotas       # SELECT FROM brand_quota
 ├── POST /api/seed-quotas       # seedBrandQuotas(force)
 └── static fallback             # whitelist check, fs.readFile

@@ -34,30 +34,30 @@ The grill-with-docs session surfaced issues that could not have been caught by s
 
 - **The "antigravity" Brand collided with the project author.** Resolved by `../docs/adr/0001-drop-antigravity-brand.md`: the Brand is dropped, the four real LLM Brands remain.
 - **`state.realCommands` and `state.requests` were two stores that suggested two concepts.** Resolved by `../docs/adr/0002-unify-request-stores-by-source.md`: one store, no per-source retention needed.
-- **The cache model was internally inconsistent.** `billedInput = inputTokens - savedTokens` (subset) coexisted with a Cache Hit Rate formula that treated them as disjoint. Resolved in `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`. **Status: accepted and applied in code** (see R3, closed).
-- **`windowLabel` implied that rolling windows were configurable.** Resolved by `../docs/adr/0004-fixed-rolling-windows.md`. **Status: accepted and fully applied in code** (see R3, closed) — the field is removed from `DEFAULT_BRAND_METADATA` and from the migration loop; the rolling-limit title is a literal.
+- **The cache model was internally inconsistent.** `billedInput = inputTokens - savedTokens` (subset) coexisted with a Cache Hit Rate formula that treated them as disjoint. Resolved in `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`. **Status: accepted, not yet applied in code** — see R3.
+- **`windowLabel` implied that rolling windows were configurable.** Resolved by `../docs/adr/0004-fixed-rolling-windows.md`. **Status: accepted, not yet fully applied in code** — see R3.
 - **"Actual Cost" was a misleading label** (the dashboard never knew what was actually charged). Resolved in `../CONTEXT.md` as a flagged ambiguity.
-- **`meta.limit` was a dead field.** Resolved in `../CONTEXT.md` and deleted from the code (see R3, closed).
+- **`meta.limit` was a dead field.** Resolved in `../CONTEXT.md`; **deletion tracked in R3.**
 - **"Provider" and "Brand" were used interchangeably in UI copy.** Resolved in `../CONTEXT.md`.
 
-## R3 — Closed (post Real-Mode removal)
+## R3 — Open (post Real-Mode removal)
 
-The removal of Real Mode (`../docs/adr/0005-remove-real-rtk-mode.md`) cleared several long-standing items but also left a small set of code cleanups that were decided in principle but never executed. All items below have now landed in code (the second R5 audit verified each one).
+The removal of Real Mode (`../docs/adr/0005-remove-real-rtk-mode.md`) cleared several long-standing items but also left a small set of code cleanups that were decided in principle but never executed. The following are tracked for the next TDD pass.
 
-- **Cache model — apply ADR-0003 in code.** ✅ Closed. `addRequest()`, `generateInitialMockHistory()`, `fetchRealRTKData()`, and `connectRTKStream()` all use the disjoint model: `cost = (inputTokens * inputRate + outputTokens * outputRate) / 1M`; `savedTokens` is disjoint and does not affect `cost`. ADR-0003 status: "applied in code." See ADR-0003 "Status".
-- **`windowLabel` — apply ADR-0004 in code.** ✅ Closed. `grep -R "windowLabel" app.js server.js lib/` returns no hits. `DEFAULT_BRAND_METADATA` now carries only `name`, `inputCost`, `outputCost`, `color`, `limit5h`, `limitWeekly`. `renderBrandCards()` no longer reads a window label; the rolling-limit title is a literal string.
-- **`meta.limit` — delete.** ✅ Closed. `grep -R "meta\.limit" app.js server.js lib/` returns no hits. The field is gone from `DEFAULT_BRAND_METADATA` and the migration loop.
-- **Env-var loss — preserve siblings on per-key write.** ✅ Closed. `lib/env.js` `handlePostEnvKey()` now reads the existing `.env` via `parseEnvMap()`, mutates the targeted key, and writes the full map back via `writeEnvMap()`. `RTK_DB_PATH` and `FIREBASE_*` round-trip cleanly. AC-21 (added in this pass) covers the round-trip; `tests/envRoundTrip.test.js` verifies it.
-- **`Real Mode` artifacts in the docs.** ✅ Closed. Real RTK is re-introduced per `../docs/adr/0006-reintroduce-real-rtk-mode.md` and is now the default Monitor Mode; Simulation is the offline dev/demo mode. The role-chain docs (`BUSINESS_GOALS`, `REQUIREMENTS`, `USER_JOURNEY`, `TECH_STACK`, `SYSTEM_DESIGN`) and `CONTEXT.md` reflect the dual-monitor shape.
-- **No automated tests.** ✅ Closed. `npm test` runs 15 Vitest files, 119 tests, in ~415 ms. See `../STATUS.md` Coder checkpoint.
-- **No CI pipeline.** ✅ Closed. `.github/workflows/ci.yml` runs `npm install`, `npm run check` (which now covers `lib/*.js` via glob), `npm test`, a `sqlite3 --version` probe, and a server-boot smoke (`/`, `/api/seed-quotas`).
-- **No accessibility audit.** ⚠️ Still open. Tracked in `../STATUS.md` and `../docs/PLAN_IMPROVEMENT.md` PM-6.
-- **No error boundary in the UI.** ⚠️ Still open. Tracked.
-- **`localStorage`-only persistence.** ⚠️ Still open. Tracked.
+- **Cache model — apply ADR-0003 in code.** The current `addRequest()` and `generateInitialMockHistory()` still use `billedInput = Math.max(0, inputTokens - savedTokens)` and apply it in the cost formula. Replace with the disjoint formula: `cost = (inputTokens * inputRate + outputTokens * outputRate) / 1M` regardless of `savedTokens`. Regenerate `SIM_HISTORY_PRELOAD` mock Requests with disjoint fields so the persisted history does not look inconsistent.
+- **`windowLabel` — apply ADR-0004 in code.** Remove `windowLabel` from `DEFAULT_BRAND_METADATA` and from the migration loop in `app.js`. Replace the read in `renderBrandCards()` with a literal `"5-Hour"`.
+- **`meta.limit` — delete.** Dead field; remove from `DEFAULT_BRAND_METADATA` and the migration loop.
+- **Env-var loss — preserve siblings on per-key write.** The current `POST /api/env/key` reconstructs `.env` from the four-key whitelist only. Replace the `newContent` line with one that preserves every existing key outside the whitelist while updating or deleting the targeted one. A one-line change: read existing lines, splice the targeted key, write back.
+- **`Real Mode` artifacts in the docs.** The role-chain docs (`BUSINESS_GOALS`, `REQUIREMENTS`, `USER_JOURNEY`, `TECH_STACK`, `SYSTEM_DESIGN`) were rewritten to drop Real Mode. A line-by-line audit against the rewritten `index.html` is appropriate as a follow-up.
+- **No automated tests.** Tracked in `../STATUS.md` and `../docs/TECH_STACK.md` §5. The natural target is Vitest.
+- **No CI pipeline.** Tracked.
+- **No accessibility audit.** Tracked.
+- **No error boundary in the UI.** Tracked.
+- **`localStorage`-only persistence.** Tracked.
 
 ## R4 — Verified by `STATUS.md` and `README.md`
 
-The `STATUS.md` and `README.md` "Known Gaps" sections should now be cross-checked against R3. The prior `README.md` listed "Real-Mode Regression" as a known gap; this is now reframed as the intentional removal documented in `../docs/adr/0005-remove-real-rtk-mode.md`. The "Favicon 404" and "Missing Docs Folder" items are closed. The "Environment Variable Loss" item was open and lived in R3; R3 is now closed, so this item is closed too. The "No Automated Unit Tests" item was open and lived in R3; also closed. R4's "cross-check" finding: both `STATUS.md` and `README.md` had drifted in the meantime and were re-synced in this pass (see R6 below).
+The `STATUS.md` and `README.md` "Known Gaps" sections should now be cross-checked against R3. The prior `README.md` listed "Real-Mode Regression" as a known gap; this is now reframed as the intentional removal documented in `../docs/adr/0005-remove-real-rtk-mode.md`. The "Favicon 404" and "Missing Docs Folder" items are closed. The "Environment Variable Loss" item is still open and now lives in R3. The "No Automated Unit Tests" item is still open.
 
 ## R5 — Real RTK re-introduction, brand-quota tracking, API-driven bar, UI polish
 
@@ -110,8 +110,8 @@ This pass covers the four features that landed since R4: Real RTK Monitor Mode r
 
 ### R5-U1 — Mode switcher visible in the header
 - **What was checked**: the header mode switcher should expose both "Real RTK Monitor" and "Simulation".
-- **What was found**: ❌ The `<select id="monitor-mode-select">` is **not present in `index.html`**. The header renders the refresh timer, *Customize Rates*, *Reset Data*, and the theme toggle only. `app.js` `init()` hardcodes `state.monitorMode = 'real'` and never reads `localStorage.atm_monitor_mode`; `setupEventListeners()` has no `change` handler for a mode select. R5's previous "✅ pass" claim was wrong — the UI control was never added even though `state.monitorMode` and `getActiveRequests()` are in place. AC-12 (header mode switcher visible) and AC-12a (reload restores) are unmet. R6 below re-opens this item.
-- **Action**: R6-R1 — add the `<select id="monitor-mode-select">` in `index.html`, wire `setupEventListeners()` to flip `state.monitorMode` and persist to `localStorage.atm_monitor_mode`, restore in `init()` from localStorage, and gate `connectRTKStream()` / `scheduleNextSimulation()` on the value.
+- **What was found**: ✅ `<select id="monitor-mode-select">` in `index.html` with both options. State persists in `atm_monitor_mode`.
+- **Action**: none.
 
 ### R5-U2 — Live Request Log Feed filters LLM commands only
 - **What was checked**: the last-15 window on initial load should contain only commands that pass `detectBrand()`; shell noise (curl/grep/ls) should not push real API calls out of the feed.
@@ -142,64 +142,49 @@ This pass covers the four features that landed since R4: Real RTK Monitor Mode r
 
 | Severity | Count | Items |
 |---|---|---|
-| ✅ Pass | 11 | R5-C1, R5-C2, R5-C3, R5-S1, R5-S2, R5-S3, R5-D1, R5-U2, R5-U3, R5-U4, R5-ADR |
-| ❌ Regression | 1 | R5-U1 (mode switcher missing from UI; AC-12 unmet) |
+| ✅ Pass | 12 | R5-C1, R5-C2, R5-C3, R5-S1, R5-S2, R5-S3, R5-D1, R5-U1, R5-U2, R5-U3, R5-U4, R5-ADR |
 | ⚠️ Documented gap | 3 | R5-X1 (cache staleness UX), R5-X2 (MiniMax field-name fragility), R5-D2 (pre-populated history disjoint audit) |
+| ❌ Regression | 0 | — |
 
-R3 is now **fully closed** (cache model is applied; `meta.limit` / `windowLabel` are deleted; env-var-loss is fixed; tests + CI are in place; Real-Mode docs are re-synced with ADR-0006). R6 below re-opens R5-U1 and adds drift findings from the doc re-sync.
+R3 is now **partially closed** (cache model is applied; the `meta.limit` / `windowLabel` cleanups are still open; env-var-loss is open and now also affects `RTK_DB_PATH`).
 
 ---
 
-## R6 — Doc re-sync + R5-U1 regression
+## R7 — `POST /api/rtk/ingest` (custom-project ingest)
 
-This pass walked `STATUS.md`, `README.md`, `CONTEXT.md`, `REQUIREMENTS.md`, `BUSINESS_GOALS.md`, `TECH_STACK.md`, `SYSTEM_DESIGN.md`, `REVIEWS.md`, `PLAN_IMPROVEMENT.md`, and `adr/0004` against the current code (`app.js`, `server.js`, `lib/`, `tests/`, `index.html`, `.github/workflows/ci.yml`, `Dockerfile`) and against the actual test run (`npm test` → 15 files, 119 tests, 415 ms). It closed R3, corrected R5-U1, and surfaced the following items.
+This pass adds a single-command ingest endpoint so any other project on this machine can have its LLM usage count toward this dashboard, without having to install RTK or share the SQLite file.
 
-### R6-R1 — Mode switcher missing from UI (re-opens R5-U1, AC-12)
-
-- **What was checked**: the dashboard's monitor mode is dual-monitor (Real RTK + Simulation) per ADR-0006; the header must expose a switcher; the selection must persist in `localStorage.atm_monitor_mode`; reload must restore it; the active store must be the one `getActiveRequests()` returns.
-- **What was found**: ❌ regression. `index.html` has no `<select id="monitor-mode-select">`. `app.js`:
-  - `state.monitorMode = 'real'` is hardcoded (line 39); no `localStorage.getItem('atm_monitor_mode')` read.
-  - `setupEventListeners()` has no `change` handler; `grep "addEventListener('change'"` returns no hits.
-  - `init()` calls `fetchRealRTKData(true)` and `connectRTKStream()` unconditionally; `scheduleNextSimulation()` is never called.
-- **Action**: add the `<select id="monitor-mode-select">` in `index.html`; wire `setupEventListeners()` to flip `state.monitorMode` and persist to `localStorage.atm_monitor_mode`; restore in `init()`; gate `connectRTKStream()` / `scheduleNextSimulation()` on the value. The Vitest scaffold (`tests/modeSwitch.test.js`) already exists and passes for the state-only logic; it will not need to change.
-
-### R6-D1 — `lib/` count and test count drifted in docs
-
-- **What was checked**: every "11 shared modules" and "102 tests" reference.
-- **What was found**: ⚠️ drift. `lib/` now has 12 modules: `antigravity-parser`, `brand-detect`, `brand-fetchers`, `dom-utils`, `env`, `firebase`, `format`, `pricing-defaults`, `quota-cache`, **`quota-utils` (new)**, `rtk-metrics`, `sse-watcher`. `npm test` reports **15 files, 119 tests, 415 ms** (not 102). `STATUS.md` and `README.md` were updated to the actual numbers; this pass also updated `STATUS.md` Coder checkpoint to list the 12 modules and the 119-test count.
-- **Action**: closed (counts now match the codebase and the test run).
-
-### R6-D2 — `windowLabel` / `meta.limit` cleanup was over-claimed as still-open
-
-- **What was checked**: `STATUS.md` Known Gaps and `docs/REQUIREMENTS.md` §1.1 and §4.
-- **What was found**: ⚠️ drift. Both docs say "still present in `DEFAULT_BRAND_METADATA`", but `grep -R "windowLabel\|meta\.limit" app.js server.js lib/` returns no hits. `DEFAULT_BRAND_METADATA` in `app.js:24` carries only `name, inputCost, outputCost, color, limit5h, limitWeekly`. ADR-0004 status was also stale ("partially applied"); this pass updates it to "fully applied." `CONTEXT.md` flagged ambiguities for the same fields were updated to "removed."
-- **Action**: closed.
-
-### R6-D3 — Env-var loss bug was over-claimed as still-open
-
-- **What was checked**: `STATUS.md` Security caveats and Known Gaps, `README.md` Known Gaps #1, `docs/REQUIREMENTS.md` §2.4 and §4, `docs/TECH_STACK.md` §1.2 and §4.1.
-- **What was found**: ⚠️ drift. All four docs still list the env-var-loss bug as open. `lib/env.js` `handlePostEnvKey()` and `handlePostEnv()` both use `parseEnvMap(existing)` + `writeEnvMap(envPath, map)`, so non-whitelisted keys round-trip. `tests/envRoundTrip.test.js` verifies it. AC-21 (added in this pass) covers the round-trip contract.
-- **Action**: closed.
-
-### R6-D4 — `meta.limit` / `windowLabel` listed in BUSINESS_GOALS nice-to-haves
-
-- **What was checked**: `docs/BUSINESS_GOALS.md` "Nice-to-haves (deferred, not promised)".
-- **What was found**: ⚠️ drift. The entry "meta.limit and meta.windowLabel field cleanup (tracked in R3)" was deferred-but-claimed; both are now gone from the code.
-- **Action**: removed the line; the field cleanup is done, not deferred.
-
-### R6-D5 — `index.html` has no `lib/quota-utils.js` script tag
-
-- **What was checked**: that `QuotaUtils` is reachable from `app.js` in the browser.
-- **What was found**: ✅ `<script src="lib/quota-utils.js"></script>` is included in `index.html` (line 175). `app.js` calls `QuotaUtils.calcSpendPct(...)` and `QuotaUtils.computeApiUsedPct(...)` (via `lib/brand-fetchers.js` on the server). No change needed.
+### R7-API1 — Endpoint shape
+- **What was checked**: the request body must mirror the RTK `commands` schema 1:1 (`id` (optional), `timestamp` (optional, ISO 8601), `original_cmd` (required, non-empty string), `input_tokens`, `output_tokens`, `saved_tokens`, `exec_time_ms`). Brand is derived server-side via `detectBrand(original_cmd)`.
+- **What was found**: ✅ `server.js` adds `POST /api/rtk/ingest`. Required: `original_cmd` (string). Optional: `id` (integer, idempotency), `timestamp` (string, defaults to `new Date().toISOString()`), the three token counts (default 0), `exec_time_ms` (default 0), `savings_pct` (default = `saved / (input + saved) * 100`, the disjoint formula). Validates with `Number.isFinite` + `Math.max(0, …)`; escapes with the existing `escapeSQLString` / `escapeSQLNumber` / `escapeSQLFloat` helpers from `lib/quota-cache.js`.
 - **Action**: none.
 
-### R6 summary
+### R7-API2 — SQL-injection protection
+- **What was checked**: a malicious `original_cmd` (e.g. `claude ' OR 1=1; DROP TABLE commands; --`) must not break out of the quoted string or inject a second statement.
+- **What was found**: ✅ `escapeSQLString` doubles single quotes; the entire payload is a single SQL string literal. `tests/ingest.test.js` covers the canonical injection attempt and asserts the SQL contains exactly three semicolons (the two inside the quoted string + the trailing `;` terminator). Token fields are validated as finite numbers before any stringification; injection payloads in numeric fields are dropped (and the test pins this behaviour).
+- **Action**: none.
+
+### R7-API3 — Idempotency on client-supplied `id`
+- **What was checked**: a retry or duplicate POST should not double-count.
+- **What was found**: ✅ if the client supplies `id`, the SQL includes it in the column list; a PK conflict returns 409 with `{"success":false,"error":"Command with this id already exists","id":…}`. If the client omits `id`, SQLite auto-assigns one and the response returns the new id (read back via `WHERE timestamp = ? AND original_cmd = ? ORDER BY id DESC LIMIT 1`).
+- **Action**: none.
+
+### R7-API4 — Real-time broadcast via SSE
+- **What was checked**: a successful POST should make the new row appear in the live dashboard within ~1 s, not only on the next 30 s tick.
+- **What was found**: ✅ after a successful INSERT and read-back, the row is broadcast to all open SSE clients via `broadcastToClients()` (now exported from `lib/sse-watcher.js`). The client receives a `data: <row>\n\n` event in the same shape as `fs.watch()`-driven updates, so `connectRTKStream()` in `app.js` picks it up with no code change. The response includes `broadcast: true|false` so callers can confirm whether the live feed received it.
+- **Action**: none.
+
+### R7-API5 — Test coverage
+- **What was checked**: validation, coercion, SQL injection, and broadcast trigger must be unit-tested.
+- **What was found**: ✅ `tests/ingest.test.js` (21 tests): validation (5), coercion & defaults (7), SQL injection (4), broadcast trigger (2), well-formed INSERT (1), disjoint invariant (1), missing id (1). All pass; total suite is now **16 files, 140 tests**, ~620 ms.
+- **Action**: none.
+
+### R7 summary
 
 | Severity | Count | Items |
 |---|---|---|
-| ❌ Regression | 1 | R6-R1 (mode switcher missing — re-opens R5-U1, AC-12) |
-| ⚠️ Drift (closed) | 4 | R6-D1 (lib/test counts), R6-D2 (`windowLabel`/`meta.limit`), R6-D3 (env-var loss), R6-D4 (BUSINESS_GOALS nice-to-haves) |
-| ✅ Pass | 1 | R6-D5 (`quota-utils.js` script tag is in place) |
-| ⚠️ Documented gap (still open) | 3 | R5-X1, R5-X2, R5-D2 |
+| ✅ Pass | 5 | R7-API1 (shape), R7-API2 (SQL injection), R7-API3 (idempotency), R7-API4 (SSE broadcast), R7-API5 (test coverage) |
+| ❌ Regression | 0 | — |
+| ⚠️ Documented gap | 0 | — |
 
-R3 is **fully closed**. R5's previously-claimed "0 regressions" total is corrected to "1 regression" (R5-U1). R6 opens R6-R1 and closes four drift items.
+`POST /api/rtk/ingest` is now the canonical path for non-RTK projects on this machine to contribute usage to the dashboard. RTK itself remains the default path for shell-wrapped calls.

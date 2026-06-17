@@ -6,9 +6,9 @@
 
 ### 1.1 Runtime & languages
 
-- **Server**: Node.js (no framework). `server.js` (~750 lines) handles static asset serving, eight API endpoints, CORS, path-traversal protection, an SSE handler, an outbound HTTPS client, and a `child_process.execFile('sqlite3', …)` reader. No Express, no Koa, no Fastify. Endpoints in scope:
+- **Server**: Node.js (no framework). `server.js` (~520 lines, with the heavy lifting in `lib/`) handles static asset serving, nine API endpoints, CORS, path-traversal protection, an SSE handler, an outbound HTTPS client, and a `child_process.execFile('sqlite3', …)` reader. No Express, no Koa, no Fastify. Endpoints in scope:
   - `GET /api/env`, `POST /api/env`, `POST /api/env/key` — `.env` read/write
-  - `GET /api/rtk`, `GET /api/rtk/summary`, `GET /api/rtk/stream` — Real RTK Monitor (snapshot, summary, SSE)
+  - `GET /api/rtk`, `GET /api/rtk/summary`, `GET /api/rtk/stream`, `POST /api/rtk/ingest` — Real RTK Monitor (snapshot, summary, SSE, custom-project ingest from any project on this machine)
   - `GET /api/seed-quotas`, `POST /api/seed-quotas` — provider-quota cache
 - **Client**: vanilla ES2020 in the browser. No bundler, no transpiler, no framework. `app.js` (~1,200 lines) attaches one `DOMContentLoaded` handler and renders into pre-existing DOM nodes.
 - **Templating**: none. The HTML is a static `index.html`; dynamic content is built by `document.createElement` and `appendChild` (not `innerHTML` for untrusted data).
@@ -99,7 +99,8 @@ The system also depends on the **`sqlite3` CLI** being on `PATH` (not a Node dep
 - **`.env` writer**: per-key endpoint whitelists the four allowed key names. Newlines are stripped from values to prevent `.env` injection.
 - **Per-key writer preserves siblings**: `POST /api/env/key` whitelists a key name, but the writer reads the existing `.env` first and writes the full map back. `RTK_DB_PATH` (a non-whitelisted key the server honours via `process.env`) and `FIREBASE_*` round-trip cleanly. Closed in `../docs/REVIEWS.md` R3; verified by `tests/envRoundTrip.test.js`. Note: the per-key endpoint still rejects non-whitelisted *key names* in the write body — only the existing siblings are preserved.
 - **SQLite query construction**: all SQL is constructed via `escapeSQLString` / `escapeSQLNumber` helpers; no string interpolation of user-supplied values. `child_process.execFile('sqlite3', …)` is used (not `exec`) so the command is array-form and not subject to shell parsing.
-- **SSE stream**: the `/api/rtk/stream` endpoint holds connections open; a `req.on('close')` handler removes the client from `sseClients` to avoid leaks. No inbound user input is reflected back in the stream payload.
+- **SSE stream**: the `/api/rtk/stream` endpoint holds connections open; a `req.on('close')` handler removes the client from `sseClients` to avoid leaks. No inbound user input is reflected back in the stream payload. The same `sseClients` array is used by `POST /api/rtk/ingest` to broadcast a successfully-inserted row to all open clients (`broadcastToClients()` is exported from `lib/sse-watcher.js`).
+- **Ingest endpoint** (`POST /api/rtk/ingest`): single-command INSERT into the live RTK `commands` table, scoped to a non-RTK client. Body validated with `Number.isFinite` + `Math.max(0, …)` for numeric fields and `escapeSQLString` for `original_cmd` / `timestamp`; escaped with the same helpers used by `lib/quota-cache.js` so the SQL pipeline is uniform. No auth — the loopback CORS allowlist is the trust boundary. R7 in `../docs/REVIEWS.md`.
 
 ### 4.2 Secret handling
 

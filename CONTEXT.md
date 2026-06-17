@@ -11,7 +11,7 @@ A fixed sliding time window of five hours used to compute accumulated Cost and t
 _Avoid_: 5h window, rolling 5h
 
 **Brand**:
-An LLM provider tracked by the dashboard, identified by a stable string key. v1 supports four: `gemini`, `claude`, `minimax`, `glm`.
+An LLM provider tracked by the dashboard, identified by a stable string key. v1 supports five: `gemini`, `claude`, `minimax`, `glm`, `mimo`.
 _Avoid_: Provider, Model, Vendor
 Aliases: "Provider" is acceptable in user-facing copy but never in data fields.
 
@@ -72,6 +72,9 @@ Note: in the SQLite RTK DB, the closest analogue is the `commands` row keyed by 
 
 **Rolling Spend Limit**:
 A cap on accumulated local Cost over a fixed sliding time window. A Brand has exactly two: 5-Hour and Weekly. Distinct from the provider's Brand Quota, which is a separate, authoritative figure.
+
+**Ingest Endpoint**:
+`POST /api/rtk/ingest`. The single-command HTTP path for non-RTK clients (any other project on this machine) to contribute LLM usage to the dashboard without installing RTK or sharing the SQLite file. Mirrors the RTK `commands` schema 1:1; INSERTs the row and broadcasts it over the existing SSE channel so the live dashboard updates within ~1 s. Body is validated with `Number.isFinite` + `Math.max(0, …)` for numeric fields and `escapeSQLString` for `original_cmd` / `timestamp`. Brand is derived server-side via `detectBrand(original_cmd)`. No auth — the loopback CORS allowlist is the trust boundary. See `docs/adr/0006-reintroduce-real-rtk-mode.md` for the surrounding context and `docs/REVIEWS.md` R7 for the audit pass.
 
 **RTK**:
 The user's RTK-style proxy that writes LLM command records to `~/Library/Application Support/rtk/history.db`. The dashboard does not depend on the RTK binary directly; it only reads the SQLite file. If RTK is not running, the Real RTK Monitor still works for any commands already written to the DB.
