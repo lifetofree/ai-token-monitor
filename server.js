@@ -495,6 +495,9 @@ async function seedBrandQuotas(force) {
 
     let row;
     if (!apiKey) {
+      // No API key — but still include RTK spend data so Firebase/ESP32
+      // can display token counts and cost from the local database.
+      const brandRtk = rtkSpend[brand] || null;
       row = {
         brand,
         remaining: null,
@@ -503,7 +506,7 @@ async function seedBrandQuotas(force) {
         reset_at_weekly: null,
         weekly_remaining: null,
         unit: 'missing_key',
-        raw_json: null,
+        raw_json: brandRtk ? { _rtk_spend: brandRtk } : null,
         seeded_at: Date.now(),
         window_started_at: null,
         error: `no ${config.envKey} in .env`
