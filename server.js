@@ -46,7 +46,10 @@ const server = http.createServer((req, res) => {
     const urlObj = new URL(req.url, `http://localhost:${PORT}`);
     const sinceId = parseInt(urlObj.searchParams.get('since') || '0', 10) || 0;
     const whereClause = sinceId > 0 ? `WHERE id > ${sinceId}` : '';
-    const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path FROM commands ${whereClause} ORDER BY id ASC LIMIT 1000`;
+    // Initial load: fetch the LATEST 1000 commands (DESC + reverse).
+    // Incremental: fetch commands after sinceId (ASC).
+    const sortOrder = sinceId > 0 ? 'ASC' : 'DESC';
+    const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path FROM commands ${whereClause} ORDER BY id ${sortOrder} LIMIT 1000`;
 
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
