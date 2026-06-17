@@ -93,7 +93,7 @@ const server = http.createServer((req, res) => {
     // Return all projects with a non-empty project_path. Brand is resolved
     // client-side via detectBrand(original_cmd) when the column is empty.
     // We return a sample original_cmd per group so the client can attribute brand.
-    const query = `SELECT project_path AS project, brand, COUNT(*) AS requests, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(saved_tokens) AS saved_tokens, (SELECT original_cmd FROM commands c2 WHERE c2.project_path = commands.project_path AND c2.timestamp >= ${escapeSQLString(sevenDaysAgo)} AND (c2.input_tokens > 0 OR c2.output_tokens > 0) LIMIT 1) AS sample_cmd FROM commands WHERE timestamp >= ${escapeSQLString(sevenDaysAgo)} AND project_path != '' GROUP BY project_path, brand ORDER BY project_path, brand`;
+    const query = `SELECT project_path AS project, brand, COUNT(*) AS requests, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(saved_tokens) AS saved_tokens, (SELECT original_cmd FROM commands c2 WHERE c2.project_path = commands.project_path AND c2.brand = commands.brand AND c2.timestamp >= ${escapeSQLString(sevenDaysAgo)} AND (c2.input_tokens > 0 OR c2.output_tokens > 0) LIMIT 1) AS sample_cmd FROM commands WHERE timestamp >= ${escapeSQLString(sevenDaysAgo)} AND project_path != '' GROUP BY project_path, brand ORDER BY project_path, brand`;
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (error || !stdout.trim()) {
