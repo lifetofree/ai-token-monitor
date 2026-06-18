@@ -249,6 +249,7 @@ const server = http.createServer((req, res) => {
             const row = rows[0];
             if (row) {
               broadcastToClients(row);
+              triggerFirebaseUpdate();
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, id: row ? row.id : clientId, command: row || null, broadcast: !!row }));
@@ -428,9 +429,27 @@ const server = http.createServer((req, res) => {
   });
 });
 
+let firebaseUpdateTimeout = null;
+function triggerFirebaseUpdate() {
+  if (firebaseUpdateTimeout) clearTimeout(firebaseUpdateTimeout);
+  firebaseUpdateTimeout = setTimeout(async () => {
+    try {
+      const results = await readBrandQuotaRows();
+      const env = loadEnv(STATIC_ROOT);
+      const rtkSpend = await getRtkSpendMetrics();
+      await publishToFirebase(results, env, rtkSpend);
+      console.log('[firebase] Pushed real-time update for ESP32');
+    } catch (e) {
+      console.error('[firebase] Real-time publish failed:', e?.message);
+    }
+  }, 1000); // 1s debounce to prevent spamming during rapid requests
+}
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`AI Token Monitor running at http://localhost:${PORT}/`);
-  initWatcher(DB_PATH);
+  initWatcher(DB_PATH, () => {
+    triggerFirebaseUpdate();
+  });
   ensureBrandQuotaTable();
   ensureBrandColumn();
   ensureAgentUsageTable();
@@ -481,9 +500,11 @@ function syncAgentUsage() {
   const data = parseAllTranscripts();
   if (!data || !data.sessions || data.sessions.length === 0) return;
 
+  let pendingQueries = 0;
   data.sessions.forEach(session => {
     if (_agentMtimeCache.get(session.conversationId) === session.lastModified) return;
 
+    pendingQueries++;
     const query = `INSERT OR REPLACE INTO agent_usage (conversation_id, last_updated, input_tokens, output_tokens, cached_tokens, total_cost) VALUES (
       ${escapeSQLString(session.conversationId)},
       ${escapeSQLNumber(session.lastModified)},
@@ -493,10 +514,14 @@ function syncAgentUsage() {
       ${escapeSQLFloat(session.totalCost)}
     );`;
     execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
+      pendingQueries--;
       if (error) {
         console.error(`Failed to sync agent session ${session.conversationId}:`, error);
       } else {
         _agentMtimeCache.set(session.conversationId, session.lastModified);
+        if (pendingQueries === 0) {
+          triggerFirebaseUpdate();
+        }
       }
     });
   });
