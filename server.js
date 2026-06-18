@@ -261,6 +261,9 @@ const server = http.createServer((req, res) => {
     // MiniMax) actually runs. Without this hop, the GET path would return
     // stale rows indefinitely and the dashboard would never see fresh data.
     seedBrandQuotas(false).then((out) => {
+      if (!out.cached) {
+        publishToFirebase(out.results, out.env, out.rtkSpend).catch(e => console.error('[firebase]', e?.message));
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, cached: out.cached, quotas: out.results }));
     }).catch((err) => {
