@@ -41,8 +41,10 @@ let state = {
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
   currentSort: { key: 'brand', direction: 'asc' },
-  agentUsage: null
+  agentUsage: null,
+  mimoUsage: null
 };
+window._state = state; // expose for debugging
 
 // Migration: Ensure new brands and fields exist in loaded state (older localStorage payloads)
 Object.keys(DEFAULT_BRAND_METADATA).forEach(bKey => {
@@ -169,6 +171,7 @@ function init() {
   fetchAPIKeys();
   fetchBrandQuotas();
   fetchAgentUsage();
+  fetchMimoUsage();
 
   // Start countdown loops
   startCountdownTimer();
@@ -296,6 +299,31 @@ function calculateAndRenderDashboard() {
       if (brandData.gemini.earliestWeeklyTimestamp === null || agentEarliestWeekly < brandData.gemini.earliestWeeklyTimestamp) {
         brandData.gemini.earliestWeeklyTimestamp = agentEarliestWeekly;
       }
+    }
+  }
+
+  // Merge MiMo CLI usage from all projects
+  if (state.mimoUsage && state.mimoUsage.sessions && brandData.mimo) {
+    const meta = state.brandMetadata.mimo || {};
+    const inputCost = meta.inputCost || 1.0;
+    const outputCost = meta.outputCost || 4.0;
+    for (const s of state.mimoUsage.sessions) {
+      brandData.mimo.inputTokens += s.inputTokens;
+      brandData.mimo.outputTokens += s.outputTokens;
+      brandData.mimo.savedTokens += s.cacheReadTokens;
+      const cost = ((s.inputTokens * inputCost) + (s.outputTokens * outputCost)) / 1000000;
+      brandData.mimo.cost += cost;
+      brandData.mimo.cost5h += cost;
+      brandData.mimo.costWeekly += cost;
+      brandData.mimo.tokens5h += s.totalTokens;
+      brandData.mimo.tokensWeekly += s.totalTokens;
+      brandData.mimo.requests += s.messages;
+      globalRequests += s.messages;
+      globalInputTokens += s.inputTokens;
+      globalOutputTokens += s.outputTokens;
+      globalSavedTokens += s.cacheReadTokens;
+      globalCost += cost;
+      globalSavings += (s.cacheReadTokens * inputCost) / 1000000;
     }
   }
 
@@ -600,6 +628,7 @@ function startCountdownTimer() {
       fetchRealRTKData();
       fetchBrandQuotas();
       fetchAgentUsage();
+      fetchMimoUsage();
       stampLastUpdated();
       scheduleDashboardRender();
       refreshTimer = getRefreshInterval();
@@ -1133,6 +1162,21 @@ function fetchAgentUsage() {
     })
     .catch(err => {
       console.warn('Failed to fetch agent usage:', err);
+    });
+}
+
+function fetchMimoUsage() {
+  fetch('/api/mimo-usage')
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      state.mimoUsage = data;
+      scheduleDashboardRender();
+    })
+    .catch(err => {
+      console.warn('[MIMO] Failed to fetch MiMo usage:', err);
     });
 }
 

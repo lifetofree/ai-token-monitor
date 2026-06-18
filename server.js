@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec, execFile } = require('child_process');
 const { parseAllTranscripts } = require('./lib/antigravity-parser');
+const { parseMimoUsage } = require('./lib/mimo-parser');
 const { BRAND_FETCHERS } = require('./lib/brand-fetchers');
 const { getRtkSpendMetrics } = require('./lib/rtk-metrics');
 const { publishToFirebase } = require('./lib/firebase');
@@ -49,7 +50,7 @@ const server = http.createServer((req, res) => {
     // Initial load: fetch the LATEST 1000 commands (DESC + reverse).
     // Incremental: fetch commands after sinceId (ASC).
     const sortOrder = sinceId > 0 ? 'ASC' : 'DESC';
-    const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path FROM commands ${whereClause} ORDER BY id ${sortOrder} LIMIT 1000`;
+    const query = `SELECT id, timestamp, original_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, project_path, brand FROM commands ${whereClause} ORDER BY id ${sortOrder} LIMIT 1000`;
 
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -330,6 +331,18 @@ const server = http.createServer((req, res) => {
       } catch (e) {
         res.end(JSON.stringify({ error: 'Parse failed' }));
       }
+    });
+    return;
+  }
+
+  // API Endpoint: MiMo CLI usage across all projects
+  if (req.method === 'GET' && req.url === '/api/mimo-usage') {
+    parseMimoUsage().then(data => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, ...data }));
+    }).catch(err => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, sessions: [], totalTokens: 0, totalCost: 0, error: err.message }));
     });
     return;
   }
