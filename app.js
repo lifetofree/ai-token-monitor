@@ -140,7 +140,9 @@ function initElements() {
     tokenAnthropic: document.getElementById('token-anthropic'),
     tokenGemini: document.getElementById('token-gemini'),
     tokenGlm: document.getElementById('token-glm'),
-    tokenMinimax: document.getElementById('token-minimax')
+    tokenMinimax: document.getElementById('token-minimax'),
+    projectsSection: document.getElementById('projects-section'),
+    projectsTableContainer: document.getElementById('projects-table-container')
   };
 }
 
@@ -167,6 +169,7 @@ function init() {
   fetchAPIKeys();
   fetchBrandQuotas();
   fetchAgentUsage();
+  fetchProjectData();
 
   // Start countdown loops
   startCountdownTimer();
@@ -598,6 +601,7 @@ function startCountdownTimer() {
       fetchRealRTKData();
       fetchBrandQuotas();
       fetchAgentUsage();
+      fetchProjectData();
       stampLastUpdated();
       scheduleDashboardRender();
       refreshTimer = getRefreshInterval();
@@ -1132,6 +1136,114 @@ function fetchAgentUsage() {
     });
 }
 
+function fetchProjectData() {
+  fetch('/api/rtk/projects')
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      if (data && data.projects) {
+        renderProjectBreakdown(data.projects);
+      }
+    })
+    .catch(err => {
+      console.warn('Failed to fetch project data:', err);
+    });
+}
+
+function renderProjectBreakdown(projects) {
+  if (!elements.projectsTableContainer || !elements.projectsSection) return;
+
+  if (!projects || projects.length === 0) {
+    elements.projectsSection.style.display = 'none';
+    return;
+  }
+
+  // Show only rows with a real project_path (not RTK proxy)
+  const custom = projects.filter(p => p.project !== '(rtk-proxy)');
+  if (custom.length === 0) {
+    elements.projectsSection.style.display = 'none';
+    return;
+  }
+
+  elements.projectsSection.style.display = '';
+
+  // Group by project path
+  const groups = {};
+  custom.forEach(p => {
+    if (!groups[p.project]) {
+      groups[p.project] = [];
+    }
+    groups[p.project].push(p);
+  });
+
+  const htmlRows = [];
+  Object.keys(groups).sort().forEach(projectPath => {
+    const brandDataList = groups[projectPath];
+    
+    let totalRequests = 0;
+    let totalTokens = 0;
+    let totalCost = 0;
+
+    const brandRowsHtml = brandDataList.map(p => {
+      const brandKey = p.brand || detectBrand(p.sample_cmd) || 'claude';
+      const meta = state.brandMetadata[brandKey] || {};
+      const cost = ((p.input_tokens * (meta.inputCost || 3))
+                  + (p.output_tokens * (meta.outputCost || 15))) / 1000000;
+      const brandName = meta.name || brandKey;
+      const brandColor = meta.color || FALLBACK_BRAND_COLOR;
+      const tokens = p.input_tokens + p.output_tokens;
+
+      totalRequests += p.requests;
+      totalTokens += tokens;
+      totalCost += cost;
+
+      return `<tr class="project-brand-row">
+        <td class="project-brand-cell">
+          <div style="display: flex; align-items: center; gap: 6px; padding-left: 20px;">
+            <span class="badge-brand-dot" style="background-color: ${brandColor}; width: 6px; height: 6px; border-radius: 50%;"></span>
+            <span>${escapeHtml(brandName)}</span>
+          </div>
+        </td>
+        <td class="font-mono-val">${formatNumber(p.requests)}</td>
+        <td class="font-mono-val">${formatNumber(tokens)}</td>
+        <td class="font-mono-val">${formatCurrency(cost)}</td>
+      </tr>`;
+    }).join('');
+
+    const headerHtml = `<tr class="project-header-row">
+      <td class="project-name-cell" title="${escapeHtml(projectPath)}">${escapeHtml(shortPath(projectPath))}</td>
+      <td class="font-mono-val" style="font-weight: 600;">${formatNumber(totalRequests)}</td>
+      <td class="font-mono-val" style="font-weight: 600;">${formatNumber(totalTokens)}</td>
+      <td class="font-mono-val" style="font-weight: 600;">${formatCurrency(totalCost)}</td>
+    </tr>`;
+
+    htmlRows.push(headerHtml);
+    htmlRows.push(brandRowsHtml);
+  });
+
+  elements.projectsTableContainer.innerHTML = `
+    <table class="projects-table">
+      <thead>
+        <tr>
+          <th>Project / Brand</th>
+          <th>Reqs</th>
+          <th>Tokens (7d)</th>
+          <th>Cost (7d)</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${htmlRows.join('')}
+      </tbody>
+    </table>`;
+}
+
+function shortPath(p) {
+  if (!p) return '';
+  return p.split('/').filter(Boolean).slice(-2).join('/');
+}
+
 function getActiveRequests() {
   return state.monitorMode === 'sim' ? state.requests : state.realCommands;
 }
@@ -1303,6 +1415,9 @@ function connectRTKStream() {
         ]);
 
         scheduleDashboardRender();
+        if (cmd.project_path) {
+          fetchProjectData();
+        }
       }
     } catch (e) {
       console.error('Error processing real-time SSE stream packet:', e);

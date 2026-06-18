@@ -93,7 +93,33 @@ const server = http.createServer((req, res) => {
     // Return all projects with a non-empty project_path. Brand is resolved
     // client-side via detectBrand(original_cmd) when the column is empty.
     // We return a sample original_cmd per group so the client can attribute brand.
-    const query = `SELECT project_path AS project, brand, COUNT(*) AS requests, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(saved_tokens) AS saved_tokens, (SELECT original_cmd FROM commands c2 WHERE c2.project_path = commands.project_path AND c2.brand = commands.brand AND c2.timestamp >= ${escapeSQLString(sevenDaysAgo)} AND (c2.input_tokens > 0 OR c2.output_tokens > 0) LIMIT 1) AS sample_cmd FROM commands WHERE timestamp >= ${escapeSQLString(sevenDaysAgo)} AND project_path != '' GROUP BY project_path, brand ORDER BY project_path, brand`;
+    const query = `WITH derived_commands AS (
+      SELECT
+        RTRIM(project_path, '/') AS project,
+        CASE
+          WHEN brand != '' AND brand IS NOT NULL THEN brand
+          WHEN original_cmd LIKE '%gemini%' OR original_cmd LIKE '%google-generative%' OR original_cmd LIKE '%genai%' THEN 'gemini'
+          WHEN original_cmd LIKE '%minimax%' THEN 'minimax'
+          WHEN original_cmd LIKE '%glm%' OR original_cmd LIKE '%zhipu%' THEN 'glm'
+          WHEN original_cmd LIKE '%claude%' OR original_cmd LIKE '%anthropic%' THEN 'claude'
+          ELSE 'claude'
+        END AS brand,
+        input_tokens,
+        output_tokens,
+        saved_tokens
+      FROM commands
+      WHERE timestamp >= ${escapeSQLString(sevenDaysAgo)} AND project_path != ''
+    )
+    SELECT
+      project,
+      brand,
+      COUNT(*) AS requests,
+      SUM(input_tokens) AS input_tokens,
+      SUM(output_tokens) AS output_tokens,
+      SUM(saved_tokens) AS saved_tokens
+    FROM derived_commands
+    GROUP BY project, brand
+    ORDER BY project, brand`;
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (error || !stdout.trim()) {

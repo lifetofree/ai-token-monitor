@@ -841,7 +841,7 @@ select:focus,
 .projects-table th,
 .projects-table td {
   text-align: left;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
 .projects-table th {
@@ -849,9 +849,26 @@ select:focus,
   color: var(--text-muted);
   font-weight: 600;
   letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
-
-  opacity: 0.5;
+.project-name-cell {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-header-row {
+  background-color: color-mix(in srgb, var(--border) 15%, transparent);
+}
+.project-brand-row td {
+  border-bottom: 1px dashed var(--border);
+}
+.project-brand-cell {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 
