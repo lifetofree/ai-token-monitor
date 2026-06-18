@@ -169,7 +169,6 @@ function init() {
   fetchAPIKeys();
   fetchBrandQuotas();
   fetchAgentUsage();
-  fetchProjectData();
 
   // Start countdown loops
   startCountdownTimer();
@@ -601,7 +600,6 @@ function startCountdownTimer() {
       fetchRealRTKData();
       fetchBrandQuotas();
       fetchAgentUsage();
-      fetchProjectData();
       stampLastUpdated();
       scheduleDashboardRender();
       refreshTimer = getRefreshInterval();
@@ -1136,117 +1134,6 @@ function fetchAgentUsage() {
     .catch(err => {
       console.warn('Failed to fetch agent usage:', err);
     });
-}
-
-function fetchProjectData() {
-  fetch('/api/rtk/projects')
-    .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
-    .then(data => {
-      renderProjectBreakdown(data.projects || []);
-    })
-    .catch(err => {
-      console.warn('Failed to fetch project data:', err);
-    });
-}
-
-function renderProjectBreakdown(projects) {
-  const container = document.getElementById('projects-table-container');
-  const section   = document.getElementById('projects-section');
-  if (!container || !section) return;
-
-  if (!projects || projects.length === 0) {
-    section.style.display = 'none';
-    return;
-  }
-
-  section.style.display = '';
-
-  // Group by project
-  const grouped = {};
-  for (const p of projects) {
-    if (!grouped[p.project]) grouped[p.project] = [];
-    grouped[p.project].push(p);
-  }
-
-  // Compute per-project totals for sorting and bar scaling
-  const projectTotals = Object.entries(grouped).map(([project, rows]) => {
-    let totalCost = 0, totalSavings = 0, totalInput = 0, totalOutput = 0, totalSaved = 0, totalReqs = 0;
-    for (const r of rows) {
-      const resolvedBrand = r.brand || (r.sample_cmd ? detectBrand(r.sample_cmd) : '') || '';
-      const meta = (window.PRICING_DEFAULTS || {})[resolvedBrand] || {};
-      const cost = ((r.input_tokens * (meta.inputCost || 0)) + (r.output_tokens * (meta.outputCost || 0))) / 1000000;
-      const savings = ((r.saved_tokens || 0) * (meta.inputCost || 0)) / 1000000;
-      totalCost += cost;
-      totalSavings += savings;
-      totalInput += r.input_tokens;
-      totalOutput += r.output_tokens;
-      totalSaved += r.saved_tokens || 0;
-      totalReqs += r.requests;
-    }
-    return { project, rows, totalCost, totalSavings, totalInput, totalOutput, totalSaved, totalReqs };
-  });
-
-  // Sort by cost descending
-  projectTotals.sort((a, b) => b.totalCost - a.totalCost);
-  const maxCost = projectTotals[0]?.totalCost || 1;
-
-  const rows = projectTotals.map(pt => {
-    const shortP = pt.project.split('/').filter(Boolean).slice(-2).join('/');
-    const barWidth = Math.max(2, (pt.totalCost / maxCost) * 100);
-    const totalTokens = pt.totalInput + pt.totalOutput;
-    const cacheRate = (pt.totalInput + pt.totalSaved) > 0
-      ? ((pt.totalSaved / (pt.totalInput + pt.totalSaved)) * 100).toFixed(0)
-      : '0';
-
-    // Summary row for the project
-    let html = `<tr class="project-summary-row">
-      <td class="project-name" title="${escapeHtml(pt.project)}">
-        <span class="project-expand-icon" data-project="${escapeHtml(pt.project)}">&#9660;</span>
-        ${escapeHtml(shortP)}
-      </td>
-      <td class="font-mono-val">${formatNumber(pt.totalReqs)}</td>
-      <td class="font-mono-val">${formatCompactNumber(totalTokens)}</td>
-      <td class="font-mono-val text-success">${formatCompactNumber(pt.totalSaved)} <span class="cache-rate-badge">${cacheRate}%</span></td>
-      <td class="font-mono-val project-cost-cell">
-        <span class="project-cost-bar" style="width: ${barWidth}%;"></span>
-        ${formatCurrency(pt.totalCost)}
-      </td>
-      <td class="font-mono-val savings-highlight">${formatCurrency(pt.totalSavings)}</td>
-    </tr>`;
-
-    // Brand sub-rows
-    for (const r of pt.rows) {
-      const resolvedBrand = r.brand || (r.sample_cmd ? detectBrand(r.sample_cmd) : '') || '';
-      const meta = (window.PRICING_DEFAULTS || {})[resolvedBrand] || {};
-      const cost = ((r.input_tokens * (meta.inputCost || 0)) + (r.output_tokens * (meta.outputCost || 0))) / 1000000;
-      const savings = ((r.saved_tokens || 0) * (meta.inputCost || 0)) / 1000000;
-      const brandTokens = r.input_tokens + r.output_tokens;
-      const brandColor = resolvedBrand ? getBrandColor(resolvedBrand) : 'var(--text-muted)';
-      html += `<tr class="project-brand-row">
-        <td class="project-brand-cell"><span class="badge-brand-dot" style="background-color: ${brandColor}"></span> ${escapeHtml(meta.name || resolvedBrand || '\u2014')}</td>
-        <td class="font-mono-val">${r.requests}</td>
-        <td class="font-mono-val">${formatCompactNumber(brandTokens)}</td>
-        <td class="font-mono-val text-success">${formatCompactNumber(r.saved_tokens || 0)}</td>
-        <td class="font-mono-val">${formatCurrency(cost)}</td>
-        <td class="font-mono-val savings-highlight">${formatCurrency(savings)}</td>
-      </tr>`;
-    }
-
-    return html;
-  }).join('');
-
-  container.innerHTML = `
-    <table class="projects-table">
-      <thead><tr>
-        <th>Project</th><th>Reqs</th>
-        <th>Tokens (7d)</th><th>Saved</th>
-        <th>Cost (7d)</th><th>Savings</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
 }
 
 function getActiveRequests() {
