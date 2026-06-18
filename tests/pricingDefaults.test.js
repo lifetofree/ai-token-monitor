@@ -11,8 +11,8 @@ const require = createRequire(import.meta.url);
 const PRICING_DEFAULTS = require('../lib/pricing-defaults.js');
 
 describe('PRICING_DEFAULTS — shape and content', () => {
-  it('exports the five v1 Brand keys', () => {
-    expect(Object.keys(PRICING_DEFAULTS).sort()).toEqual(['claude', 'gemini', 'glm', 'mimo', 'minimax']);
+  it('exports the four v1 Brand keys', () => {
+    expect(Object.keys(PRICING_DEFAULTS).sort()).toEqual(['claude', 'gemini', 'glm', 'minimax']);
   });
 
   it('every brand has name, inputCost, outputCost, limit5h, limitWeekly, color', () => {
@@ -42,8 +42,6 @@ describe('PRICING_DEFAULTS — shape and content', () => {
     expect(PRICING_DEFAULTS.minimax.outputCost).toBe(4.00);
     expect(PRICING_DEFAULTS.glm.inputCost).toBe(0.50);
     expect(PRICING_DEFAULTS.glm.outputCost).toBe(2.00);
-    expect(PRICING_DEFAULTS.mimo.inputCost).toBe(1.00);
-    expect(PRICING_DEFAULTS.mimo.outputCost).toBe(4.00);
   });
 
   it('matches the canonical spend-limit defaults (5h and weekly) that were in app.js', () => {
@@ -55,8 +53,6 @@ describe('PRICING_DEFAULTS — shape and content', () => {
     expect(PRICING_DEFAULTS.minimax.limitWeekly).toBe(15.00);
     expect(PRICING_DEFAULTS.glm.limit5h).toBe(0.80);
     expect(PRICING_DEFAULTS.glm.limitWeekly).toBe(6.00);
-    expect(PRICING_DEFAULTS.mimo.limit5h).toBe(2.00);
-    expect(PRICING_DEFAULTS.mimo.limitWeekly).toBe(15.00);
   });
 
   it('preserves the gemini display name as "Antigravity" (per ADR-0001 / migration in app.js:65)', () => {

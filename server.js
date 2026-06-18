@@ -6,7 +6,6 @@ const fs = require('fs');
 const path = require('path');
 const { exec, execFile } = require('child_process');
 const { parseAllTranscripts } = require('./lib/antigravity-parser');
-const { parseMimoUsage } = require('./lib/mimo-parser');
 const { BRAND_FETCHERS } = require('./lib/brand-fetchers');
 const { getRtkSpendMetrics } = require('./lib/rtk-metrics');
 const { publishToFirebase } = require('./lib/firebase');
@@ -175,7 +174,7 @@ const server = http.createServer((req, res) => {
       // one. project_path defaults to '' to match the schema's column default.
       const rtkCmd = (typeof payload.rtk_cmd === 'string') ? payload.rtk_cmd : '';
       const projectPath = (typeof payload.project_path === 'string') ? payload.project_path : '';
-      const VALID_BRANDS = ['claude', 'gemini', 'minimax', 'glm', 'mimo'];
+      const VALID_BRANDS = ['claude', 'gemini', 'minimax', 'glm'];
       const brandHint = (typeof payload.brand === 'string'
         && VALID_BRANDS.includes(payload.brand.toLowerCase()))
         ? payload.brand.toLowerCase()
@@ -331,18 +330,6 @@ const server = http.createServer((req, res) => {
       } catch (e) {
         res.end(JSON.stringify({ error: 'Parse failed' }));
       }
-    });
-    return;
-  }
-
-  // API Endpoint: MiMo CLI usage across all projects
-  if (req.method === 'GET' && req.url === '/api/mimo-usage') {
-    parseMimoUsage().then(data => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, ...data }));
-    }).catch(err => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, sessions: [], totalTokens: 0, totalCost: 0, error: err.message }));
     });
     return;
   }
