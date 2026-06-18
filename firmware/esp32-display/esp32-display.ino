@@ -52,7 +52,6 @@
 #define BRAND_CLAUDE     0xFB82  // #f97316 Orange  (--color-claude dark)
 #define BRAND_MINIMAX    0x269D  // #22d3ee Cyan    (--color-minimax dark)
 #define BRAND_GLM        0x4EF0  // #4ade80 Green   (--color-glm dark)
-#define BRAND_MIMO       0xE127  // #e11d48 Rose    (--color-mimo dark)
 
 // =====================================================================
 // Data model
@@ -71,11 +70,11 @@ struct AIData {
   QuotaDetails quotaWeekly;
 };
 
-AIData aiData[5];
+AIData aiData[4];
 
 int currentIndex = 0;
-const int num_ai = 5;
-String aiKeys[] = {"gemini", "claude", "minimax", "glm", "mimo"};
+const int num_ai = 4;
+String aiKeys[] = {"gemini", "claude", "minimax", "glm"};
 
 // นิยามอ็อบเจกต์ของห้องสมุดสำหรับการคุมเครือข่ายและจอภาพ
 // หมายเหตุ: FirebaseConfig/Auth/Data ถูกลบออกแล้ว — เราใช้ HTTPClient REST API
@@ -556,7 +555,6 @@ void setup() {
   aiData[1] = {"Claude",     BRAND_CLAUDE,  {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
   aiData[2] = {"MiniMax",    BRAND_MINIMAX, {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
   aiData[3] = {"GLM",        BRAND_GLM,     {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
-  aiData[4] = {"MiMo",       BRAND_MIMO,    {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
 
   // Show loading screen while connecting to WiFi & fetching data
   drawLoadingScreen();

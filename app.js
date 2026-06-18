@@ -41,10 +41,8 @@ let state = {
   isAutoSimulating: localStorage.getItem('atm_auto_sim') !== 'false',
   theme: localStorage.getItem('atm_theme') || 'light',
   currentSort: { key: 'brand', direction: 'asc' },
-  agentUsage: null,
-  mimoUsage: null
+  agentUsage: null
 };
-window._state = state; // expose for debugging
 
 // Migration: Ensure new brands and fields exist in loaded state (older localStorage payloads)
 Object.keys(DEFAULT_BRAND_METADATA).forEach(bKey => {
@@ -143,8 +141,7 @@ function initElements() {
     tokenAnthropic: document.getElementById('token-anthropic'),
     tokenGemini: document.getElementById('token-gemini'),
     tokenGlm: document.getElementById('token-glm'),
-    tokenMinimax: document.getElementById('token-minimax'),
-    tokenMimo: document.getElementById('token-mimo')
+    tokenMinimax: document.getElementById('token-minimax')
   };
 }
 
@@ -171,7 +168,6 @@ function init() {
   fetchAPIKeys();
   fetchBrandQuotas();
   fetchAgentUsage();
-  fetchMimoUsage();
 
   // Start countdown loops
   startCountdownTimer();
@@ -299,31 +295,6 @@ function calculateAndRenderDashboard() {
       if (brandData.gemini.earliestWeeklyTimestamp === null || agentEarliestWeekly < brandData.gemini.earliestWeeklyTimestamp) {
         brandData.gemini.earliestWeeklyTimestamp = agentEarliestWeekly;
       }
-    }
-  }
-
-  // Merge MiMo CLI usage from all projects
-  if (state.mimoUsage && state.mimoUsage.sessions && brandData.mimo) {
-    const meta = state.brandMetadata.mimo || {};
-    const inputCost = meta.inputCost || 1.0;
-    const outputCost = meta.outputCost || 4.0;
-    for (const s of state.mimoUsage.sessions) {
-      brandData.mimo.inputTokens += s.inputTokens;
-      brandData.mimo.outputTokens += s.outputTokens;
-      brandData.mimo.savedTokens += s.cacheReadTokens;
-      const cost = ((s.inputTokens * inputCost) + (s.outputTokens * outputCost)) / 1000000;
-      brandData.mimo.cost += cost;
-      brandData.mimo.cost5h += cost;
-      brandData.mimo.costWeekly += cost;
-      brandData.mimo.tokens5h += s.totalTokens;
-      brandData.mimo.tokensWeekly += s.totalTokens;
-      brandData.mimo.requests += s.messages;
-      globalRequests += s.messages;
-      globalInputTokens += s.inputTokens;
-      globalOutputTokens += s.outputTokens;
-      globalSavedTokens += s.cacheReadTokens;
-      globalCost += cost;
-      globalSavings += (s.cacheReadTokens * inputCost) / 1000000;
     }
   }
 
@@ -628,7 +599,6 @@ function startCountdownTimer() {
       fetchRealRTKData();
       fetchBrandQuotas();
       fetchAgentUsage();
-      fetchMimoUsage();
       stampLastUpdated();
       scheduleDashboardRender();
       refreshTimer = getRefreshInterval();
@@ -924,8 +894,7 @@ function setupEventListeners() {
       { name: 'ANTHROPIC_API_KEY', value: elements.tokenAnthropic.value.trim() },
       { name: 'GEMINI_API_KEY', value: elements.tokenGemini.value.trim() },
       { name: 'GLM_API_KEY', value: elements.tokenGlm.value.trim() },
-      { name: 'MINIMAX_API_KEY', value: elements.tokenMinimax.value.trim() },
-      { name: 'MIMO_API_KEY', value: elements.tokenMimo ? elements.tokenMimo.value.trim() : '' }
+      { name: 'MINIMAX_API_KEY', value: elements.tokenMinimax.value.trim() }
     ];
 
     Promise.all(keyUpdates.map(k =>
@@ -1122,7 +1091,6 @@ function fetchAPIKeys() {
       if (data.GEMINI_API_KEY && elements.tokenGemini) elements.tokenGemini.value = data.GEMINI_API_KEY;
       if (data.GLM_API_KEY && elements.tokenGlm) elements.tokenGlm.value = data.GLM_API_KEY;
       if (data.MINIMAX_API_KEY && elements.tokenMinimax) elements.tokenMinimax.value = data.MINIMAX_API_KEY;
-      if (data.MIMO_API_KEY && elements.tokenMimo) elements.tokenMimo.value = data.MIMO_API_KEY;
     })
     .catch(err => console.error('Failed to load local API keys from backend:', err));
 }
@@ -1162,21 +1130,6 @@ function fetchAgentUsage() {
     })
     .catch(err => {
       console.warn('Failed to fetch agent usage:', err);
-    });
-}
-
-function fetchMimoUsage() {
-  fetch('/api/mimo-usage')
-    .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
-    .then(data => {
-      state.mimoUsage = data;
-      scheduleDashboardRender();
-    })
-    .catch(err => {
-      console.warn('[MIMO] Failed to fetch MiMo usage:', err);
     });
 }
 
