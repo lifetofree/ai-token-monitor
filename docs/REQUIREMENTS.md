@@ -6,7 +6,7 @@
 
 ### 1.1 Brand
 
-A Brand is an LLM provider tracked by the dashboard. v1 supports five: `gemini`, `claude`, `minimax`, `glm`, `mimo`. The Brand `antigravity` was removed (see `../docs/adr/0001-drop-antigravity-brand.md`).
+A Brand is an LLM provider tracked by the dashboard. v1 supports four: `gemini`, `claude`, `minimax`, `glm`. The Brand `antigravity` was removed (see `../docs/adr/0001-drop-antigravity-brand.md`).
 
 Each Brand has a `Brand Metadata` record containing:
 - `name`: display name
@@ -63,7 +63,7 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 
 - The "Customize Rates" modal has two tabs: "Rates & Limits" and "API Tokens (Keys)".
 - "Rates & Limits" edits `Brand Metadata` for all five Brands (input rate, output rate, 5h cap, weekly cap). Invalid inputs (NaN, negative) are rejected; previous values are retained.
-- "API Tokens (Keys)" writes one of five allowed env keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`, `MIMO_API_KEY`) to `.env` via a per-key endpoint.
+- "API Tokens (Keys)" writes one of four allowed env keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`) to `.env` via a per-key endpoint.
 - API keys are returned masked (`****last4`) from `GET /api/env`. The full key is never sent to the browser.
 - **Known bug** (tracked in `../docs/REVIEWS.md` R3): the per-key writer still drops any `.env` keys outside the five-key whitelist. The author name `RTK_DB_PATH` is no longer relevant (RTK is gone), but the loss-of-custom-config behaviour remains for any other env keys the user adds.
 

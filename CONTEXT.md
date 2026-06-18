@@ -11,7 +11,7 @@ A fixed sliding time window of five hours used to compute accumulated Cost and t
 _Avoid_: 5h window, rolling 5h
 
 **Brand**:
-An LLM provider tracked by the dashboard, identified by a stable string key. v1 supports five: `gemini`, `claude`, `minimax`, `glm`, `mimo`.
+An LLM provider tracked by the dashboard, identified by a stable string key. v1 supports four: `gemini`, `claude`, `minimax`, `glm`.
 _Avoid_: Provider, Model, Vendor
 Aliases: "Provider" is acceptable in user-facing copy but never in data fields.
 
