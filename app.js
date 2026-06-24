@@ -1392,8 +1392,14 @@ function connectRTKStream() {
         projectPath: cmd.project_path || ''
       };
 
-      const exists = state.realCommands.some(r => r.id === newReq.id);
-      if (!exists) {
+      const existingIdx = state.realCommands.findIndex(r => r.id === newReq.id);
+      if (existingIdx !== -1) {
+        state.realCommands[existingIdx] = newReq;
+        scheduleDashboardRender();
+        if (cmd.project_path) {
+          fetchProjectData();
+        }
+      } else {
         state.realCommands.push(newReq);
         if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
           state.realCommands.shift();

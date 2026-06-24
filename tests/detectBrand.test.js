@@ -34,7 +34,7 @@ describe('detectBrand (shared logic)', () => {
   });
 
   it('returns null for non-LLM commands (shell commands)', () => {
-    expect(detectBrand('curl -s http://localhost:3000/api/rtk')).toBeNull();
+    expect(detectBrand('curl -s http://localhost:3838/api/rtk')).toBeNull();
     expect(detectBrand('grep -rn detectBrand app.js')).toBeNull();
     expect(detectBrand('ls -la /tmp')).toBeNull();
     expect(detectBrand('git status')).toBeNull();
@@ -57,8 +57,8 @@ describe('detectBrand (shared logic)', () => {
     // The dashboard's own Firebase reads/writes have brand names in the URL path
     expect(detectBrand('curl -s https://token-count-973cd-default-rtdb.asia-southeast1.firebasedatabase.app/display/quotas/claude.json?auth=token')).toBeNull();
     expect(detectBrand('curl -s https://token-count-973cd-default-rtdb.asia-southeast1.firebasedatabase.app/ai_quota/minimax.json?auth=token')).toBeNull();
-    expect(detectBrand('curl -s http://localhost:3000/api/rtk')).toBeNull();
-    expect(detectBrand('curl http://127.0.0.1:3000/api/seed-quotas')).toBeNull();
+    expect(detectBrand('curl -s http://localhost:3838/api/rtk')).toBeNull();
+    expect(detectBrand('curl http://127.0.0.1:3838/api/seed-quotas')).toBeNull();
   });
 
   it('still detects real LLM API calls (curl to provider endpoints)', () => {
