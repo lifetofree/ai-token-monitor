@@ -19,8 +19,9 @@ describe('computeApiUsedPct — 5h scope', () => {
     expect(computeApiUsedPct({ unit: 'requests', remaining: 0,  limit_value: 200 }, '5h')).toBe(100);
   });
 
-  it('returns null for per_minute unit (not a 5h window)', () => {
-    expect(computeApiUsedPct({ unit: 'per_minute', remaining: 40000, limit_value: 50000 }, '5h')).toBeNull();
+  it('returns null for local unit (Claude — tracked via RTK, no provider window)', () => {
+    expect(computeApiUsedPct({ unit: 'local' }, '5h')).toBeNull();
+    expect(computeApiUsedPct({ unit: 'local', remaining: 40000, limit_value: 50000 }, '5h')).toBeNull();
   });
 
   it('returns null for not_exposed unit', () => {
