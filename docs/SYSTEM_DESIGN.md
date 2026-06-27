@@ -4,14 +4,15 @@
 
 ## 1. High-level architecture
 
-A two-process, single-machine system:
+A two-process, single-machine system, with an optional hardware companion:
 
 - **Browser process**: `index.html` + `styles.css` + `app.js`. Renders the dashboard; reads/writes `localStorage`; supports both Real RTK Monitor (default) and Simulation modes; consumes the `/api/seed-quotas` snapshot to drive the API-aware progress bars and reset-time badges.
-- **Server process**: `server.js`. Static file server plus **eight** JSON/SSE endpoints across three concerns:
-  - **`.env` I/O**: `GET /api/env`, `POST /api/env`, `POST /api/env/key`
+- **Server process**: `server.js`. Static file server plus **nine** JSON/SSE endpoints across three concerns:
+  - **`.env` I/O**: `GET /api/env` (only ever returns the four provider keys, masked), `POST /api/env`, `POST /api/env/key`
   - **Real RTK Monitor**: `GET /api/rtk` (full snapshot), `GET /api/rtk/summary` (aggregate summary), `GET /api/rtk/stream` (SSE for incremental updates), `POST /api/rtk/ingest` (single-command ingest from non-RTK clients)
   - **Provider-quota cache**: `GET /api/seed-quotas` (cached snapshot), `POST /api/seed-quotas` (force-refresh)
-- **Outbound HTTPS client**: the server's `fetchMinimaxQuota` makes a `GET` to `https://www.minimax.io/v1/token_plan/remains` with `Authorization: Bearer <MINIMAX_API_KEY>`. This is the first outbound integration; no other fetcher makes outbound calls (Claude/GLM read quota from in-band response headers on a probe request).
+- **Outbound HTTPS clients**: (1) `fetchMinimaxQuota` makes a `GET` to `https://www.minimax.io/v1/token_plan/remains` with `Authorization: Bearer <MINIMAX_API_KEY>`; (2) `lib/firebase.js` PUTs a sanitised snapshot to `<FIREBASE_URL>/display.json?auth=<FIREBASE_AUTH>` for the ESP32 companion. GLM reads quota from in-band response headers on a probe request. Claude makes **no** outbound call (RTK-only, `unit: 'local'`).
+- **ESP32 companion** (optional): `firmware/esp32-display/esp32-display.ino` runs on an ESP32 + ST7789 240×280 TFT, polling the Firebase `display.json` node and rendering one brand per page. Enabled only when `FIREBASE_URL`/`FIREBASE_AUTH` are present in `.env`. See ADR-0007.
 
 No build step. No bundler. No transpiler. The browser loads `app.js` directly and executes it as a classic script.
 
@@ -21,33 +22,42 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 
 ```
 .
-├── app.js                  # All client logic (~1,296 lines)
+├── app.js                  # All client logic (~1,450 lines)
 ├── index.html              # Static markup
 ├── styles.css              # Design system
-├── server.js               # Node server (~1,405 lines)
+├── server.js               # Node server (~700 lines)
 ├── package.json            # devDependency: vitest
 ├── favicon.svg             # Static asset (whitelisted)
-├── .env                    # User API keys (gitignored)
+├── .env                    # User API keys + Firebase/WiFi secrets (gitignored)
 ├── .env.example            # Template
-├── .gitignore              # Excludes .env, node_modules, .claude/
+├── .gitignore              # Excludes .env, node_modules, .claude/, *.db
 ├── CONTEXT.md              # Domain language
 ├── STATUS.md               # Project status snapshot
 ├── README.md               # Project overview and Known Gaps
 ├── lib/
-│   └── antigravity-parser.js  # Parses Antigravity CLI transcript .jsonl files
+│   ├── antigravity-parser.js  # Parses Antigravity CLI transcript .jsonl files
+│   ├── firebase.js            # Publishes quota snapshot to Firebase RTDB for the ESP32 mirror
 ├── tests/
 │   ├── antigravityParser.test.js
 │   ├── computeApiUsedPct.test.js
 │   ├── cost.test.js
 │   ├── csv.test.js
 │   ├── detectBrand.test.js
+│   ├── envRoundTrip.test.js   # AC-21: .env sibling preservation
 │   ├── escapeHtml.test.js
 │   ├── fetchGeminiQuota.test.js
 │   ├── fetchMinimaxQuota.test.js
 │   ├── format.test.js
 │   ├── getRtkSpendMetrics.test.js
+│   ├── ingest.test.js          # AC-22..AC-25: ingest validation + SQLi escape
+│   ├── modeSwitch.test.js      # AC-12a/b: monitor-mode store selection
+│   ├── pricingDefaults.test.js
 │   ├── reset5hFallback.test.js
 │   └── rollingLogFilter.test.js
+├── firmware/
+│   └── esp32-display/        # ESP32 + ST7789 companion (see ADR-0007)
+│       ├── esp32-display.ino
+│       └── secrets.h          # gitignored; copied from secrets.txt
 ├── docs/
 │   ├── BUSINESS_GOALS.md
 │   ├── REQUIREMENTS.md
@@ -61,7 +71,9 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 │       ├── 0003-cache-model-disjoint-input-and-saved.md
 │       ├── 0004-fixed-rolling-windows.md
 │       ├── 0005-remove-real-rtk-mode.md          # SUPERSEDED by 0006
-│       └── 0006-reintroduce-real-rtk-mode.md
+│       ├── 0006-reintroduce-real-rtk-mode.md
+│       ├── 0007-esp32-firebase-companion-display.md
+│       └── 0008-claude-rtk-only-no-anthropic-probe.md
 └── .ai.agents/             # Role rules (see *.md)
 ```
 
@@ -162,14 +174,14 @@ interface BrandQuota {
   reset_at: number | null;       // 5-hour window end, epoch ms
   reset_at_weekly: number | null;// weekly window end, epoch ms
   weekly_remaining: number | null;
-  unit: 'requests' | 'percent' | 'not_exposed' | 'missing_key' | 'error';
+  unit: 'requests' | 'percent' | 'local' | 'not_exposed' | 'missing_key' | 'error';
   raw_json: object | null;       // full provider response (for debugging)
   seeded_at: number;             // epoch ms — when this row was last refreshed
   error: string | null;          // error message when unit === 'error'
 }
 ```
 
-`unit` semantics live in **exactly one place** in the client: `computeApiUsedPct()` in `app.js`. The conversion rule is: `percent` → `100 - remaining`; `requests` → `(limit_value - remaining) / limit_value * 100`; `not_exposed`/`missing_key`/`error` → `null` (bar falls back to local spend).
+`unit` semantics live in **exactly one place** in the client: `computeApiUsedPct()` in `app.js`. The conversion rule is: `percent` → `100 - remaining`; `requests` → `(limit_value - remaining) / limit_value * 100`; `local`/`not_exposed`/`missing_key`/`error` → `null` (bar falls back to local/RTK spend). For `local` (Claude), the amounts and reset times are drawn from the RTK spend object embedded in `raw_json`.
 
 ### 3.7 `Request.source` is back in the schema
 
@@ -405,7 +417,7 @@ seedBrandQuotas(force)
       └── INSERT OR REPLACE INTO brand_quota
 
 BRAND_FETCHERS = {
-  claude:   fetchClaudeQuota,    // probe + read anthropic-ratelimit-* headers
+  claude:   fetchClaudeQuota,    // RTK-only (unit: 'local'); no Anthropic API call
   gemini:   fetchGeminiQuota,    // probe; not_exposed
   glm:      fetchGLMQuota,        // probe + read x-ratelimit-* headers
   minimax:  fetchMinimaxQuota,    // https.request to /v1/token_plan/remains
@@ -494,8 +506,7 @@ seedBrandQuotas(force) (server-side, every 30s via dashboard tick)
    └── for each Brand:
          ├── if no apiKey → row{unit:'missing_key'}
          ├── else: result = await BRAND_FETCHERS[brand].fetch(apiKey)
-         │     ├── Claude: probe with model:'claude-3-haiku-20240307', max_tokens:1
-         │     │           read anthropic-ratelimit-requests-remaining / -limit / -reset
+         │     ├── Claude: no API call; returns unit:'local' with RTK spend in raw_json
          │     ├── Gemini: probe with gemini-1.5-flash, not_exposed
          │     ├── GLM: probe with glm-4, read x-ratelimit-remaining-requests / -limit-requests
          │     └── MiniMax: GET /v1/token_plan/remains (Bearer)
@@ -506,10 +517,35 @@ seedBrandQuotas(force) (server-side, every 30s via dashboard tick)
          └── INSERT OR REPLACE INTO brand_quota
 ```
 
+### 6.4 ESP32 companion mirror (Firebase)
+
+```
+triggerFirebaseUpdate(cmds)  (debounced, on new SSE-broadcast command)
+   │
+   ├── setTimeout(…) 500ms debounce
+   ├── seedBrandQuotas()  → fresh results + rtkSpend
+   └── publishToFirebase(results, env, rtkSpend)
+         │
+         ├── read FIREBASE_URL / FIREBASE_AUTH from env (skip if absent)
+         ├── build payload { lastUpdated, quotas: { <brand>: {remaining, spend_pct5h,
+         │     reset_at (s, not ms), …} } }  — see lib/firebase.js header
+         └── fetch PUT <FIREBASE_URL>/display.json?auth=<secret>  (8s timeout)
+
+periodic publish (every 30s quota tick, after seedBrandQuotas)
+   └── publishToFirebase(…)  (same path)
+
+ESP32 firmware (firmware/esp32-display/esp32-display.ino)
+   ├── WiFi.begin(WIFI_SSID, WIFI_PASS)
+   ├── Firebase.RTDB.getString("display")  on a poll interval
+   └── render one brand per page on the ST7789 240×280 TFT
+```
+
+The mirror is **append-only output**: the server only ever PUTs to `display.json`; the ESP32 only reads. No inbound path from the ESP32 to the dashboard. Reset timestamps are divided ms→s in `lib/firebase.js` because the firmware uses `time(nullptr)` (seconds).
+
 ## 7. Design patterns in use
 
 - **Safe DOM construction**: `appendConsoleLine(source, parts)` distinguishes `{html}` (trusted) from `{text}` (escaped). All untrusted input goes through `{text}`. RTK `original_cmd` is rendered through `{text}` segments in the Real-Time log path.
-- **Per-key env writer**: `POST /api/env/key` whitelists a key name. The "preserve siblings" intent is documented but not yet implemented (see R3).
+- **Per-key env writer**: `POST /api/env/key` whitelists a key name. Both writers read the full `.env`, merge only the allowed keys, and write back the complete map — preserving non-whitelisted siblings. `GET /api/env` exposes only the four provider keys (masked). Verified by `tests/envRoundTrip.test.js` (AC-21).
 - **Pre-populated history**: `generateInitialMockHistory()` seeds 40 mock Requests on first load so the rolling-window bars have non-zero data to render immediately.
 - **API-driven bar with local fallback**: `computeApiUsedPct()` returns `null` when the API doesn't expose a quota; the renderer falls back to the local-spend percentage. The bar tooltip names the source so the user can tell which one is driving the fill.
 - **Idempotent `ALTER TABLE` migrations**: `ensureBrandQuotaTable()` runs `CREATE TABLE IF NOT EXISTS` followed by two `ALTER TABLE … ADD COLUMN` statements; each is wrapped in a no-op handler so re-running is safe.

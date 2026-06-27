@@ -462,7 +462,7 @@ The ESP32 firmware has had three significant changes since the last reviewer pas
 
 None of these have a formal review entry in `docs/REVIEWS.md`.
 
-**Known gap surfaced by R6 brainstorm:** For Claude (`unit = "per_minute"`) and Gemini (`unit = "not_exposed"`), the ESP32 stats row shows `38% / 62% / 100%` — percent of spend budget — rather than absolute token counts. This is correct and matches the web dashboard but the display could be more explicit. Tracked as Known Gap #12 in `README.md`.
+**Known gap surfaced by R6 brainstorm:** For Claude (`unit = "local"`, RTK-only) and Gemini (`unit = "not_exposed"`), the ESP32 stats row shows `38% / 62% / 100%` — percent of spend budget — rather than absolute token counts. This is correct and matches the web dashboard but the display could be more explicit. Tracked as Known Gap #12 in `README.md`.
 
 **Action:** Write R6 in `docs/REVIEWS.md` covering: timestamp conversion correctness, `sfx` suffix guard (`total == 100`), color palette alignment, and the stats-row semantic for Claude/Gemini.
 

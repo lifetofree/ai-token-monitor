@@ -22,7 +22,7 @@ npm run dev
 # or
 node server.js
 ```
-The app auto-opens [http://localhost:3000](http://localhost:3000) in your default browser.
+The app auto-opens [http://localhost:3838](http://localhost:3838) in your default browser.
 
 To point the Real RTK reader at a non-default DB, set the `RTK_DB_PATH` env var before launch:
 ```bash
@@ -71,7 +71,7 @@ In addition to local spend, the dashboard fetches **live quota data from each pr
 
 | Brand (key → display) | Quota source | Unit | Reset windows |
 |---|---|---|---|
-| `claude` → **Claude** | `anthropic-ratelimit-*` response headers | tokens (per-minute bucket + weekly) | pm (label: "5h Rolling") + weekly |
+| `claude` → **Claude** | RTK only (no Anthropic API call) | local | 5h + weekly (RTK rolling window) |
 | `gemini` → **Antigravity** | not exposed by API → falls back to local RTK spend | — | bar falls back to RTK spend cost / limit |
 | `glm` → **GLM** | `https://bigmodel.cn/api/monitor/usage/quota/limit` (Authorization header) | percent (used %) | 5h + ~2-day/weekly (`nextResetTime`) |
 | `minimax` → **MiniMax** | `https://www.minimax.io/v1/token_plan/remains` (Bearer auth) | percent | 5h + weekly (body fields) |
@@ -269,7 +269,7 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 9. **Mirror-function tests** — most of the vitest suite re-implements the canonical formulas from `app.js` / `server.js` because those files are browser/server scripts, not modules. `lib/antigravity-parser.js` is the first exception (the parser is imported in tests). Follow-up: extract `format*` / `cost*` / `detectBrand` / `computeApiUsedPct` into the same `lib/` tree. Tracked in `STATUS.md` and `docs/REVIEWS.md` R5.
 10. **ESP32 firmware not unit-tested** — the `.ino` is a single-file Arduino sketch; the only verification is flashing it. The NTP/formatter code would benefit from being pulled out into a host-runnable test (host-side mock of `WiFi` + `time()`).
 11. **Droid-Shield secret-scanner false positives** — the local pre-push hook flags `tokens5h` variable names and `0` default values as if they were tokens. Currently worked around with `git push --no-verify`. Tracked separately; not a real security issue.
-12. **ESP32 stats row shows % for Claude/Gemini** — when the provider's API doesn't expose a native token quota (Claude: per-minute bucket; Gemini: not exposed), the ESP32 stats row shows `Used%/Left%/Total%` derived from `spend_pct5h`. The web dashboard shows the same spend %; no mismatch, but absolute token counts are not surfaced on the display for these two brands.
+12. **ESP32 stats row shows % for Claude/Gemini** — these two brands are tracked purely via RTK spend (Claude: local unit, no Anthropic quota API; Gemini: not exposed), so the ESP32 stats row shows `Used%/Left%/Total%` derived from `spend_pct5h`. The web dashboard shows the same spend %; no mismatch, but absolute token counts are not surfaced on the display for these two brands.
 
 ### Recently Closed
 

@@ -47,10 +47,10 @@ The removal of Real Mode (`../docs/adr/0005-remove-real-rtk-mode.md`) cleared se
 - **Cache model — apply ADR-0003 in code.** The current `addRequest()` and `generateInitialMockHistory()` still use `billedInput = Math.max(0, inputTokens - savedTokens)` and apply it in the cost formula. Replace with the disjoint formula: `cost = (inputTokens * inputRate + outputTokens * outputRate) / 1M` regardless of `savedTokens`. Regenerate `SIM_HISTORY_PRELOAD` mock Requests with disjoint fields so the persisted history does not look inconsistent.
 - **`windowLabel` — apply ADR-0004 in code.** Remove `windowLabel` from `DEFAULT_BRAND_METADATA` and from the migration loop in `app.js`. Replace the read in `renderBrandCards()` with a literal `"5-Hour"`.
 - **`meta.limit` — delete.** Dead field; remove from `DEFAULT_BRAND_METADATA` and the migration loop.
-- **Env-var loss — preserve siblings on per-key write.** The current `POST /api/env/key` reconstructs `.env` from the four-key whitelist only. Replace the `newContent` line with one that preserves every existing key outside the whitelist while updating or deleting the targeted one. A one-line change: read existing lines, splice the targeted key, write back.
+- **~~Env-var loss — preserve siblings on per-key write.~~ ✅ Resolved (Phase 1).** Both env writers (`POST /api/env/key`, `POST /api/env`) now read the full existing `.env`, merge only the four allowed keys, and write back the complete map, preserving siblings such as `RTK_DB_PATH`, `FIREBASE_*`, `WIFI_*`. Additionally, `GET /api/env` only ever returns the four provider keys (masked) — non-whitelisted keys are never serialised to the browser, even masked. Verified by `tests/envRoundTrip.test.js` (AC-21, 4 tests passing).
 - **`Real Mode` artifacts in the docs.** The role-chain docs (`BUSINESS_GOALS`, `REQUIREMENTS`, `USER_JOURNEY`, `TECH_STACK`, `SYSTEM_DESIGN`) were rewritten to drop Real Mode. A line-by-line audit against the rewritten `index.html` is appropriate as a follow-up.
-- **No automated tests.** Tracked in `../STATUS.md` and `../docs/TECH_STACK.md` §5. The natural target is Vitest.
-- **No CI pipeline.** Tracked.
+- **~~No automated tests.~~ ✅ Resolved.** A 16-file Vitest suite now covers the pure functions, the env round-trip (AC-21), ingest validation/SQLi (AC-22..AC-25), and mode switching (AC-12a/b). See `TECH_STACK.md` §5.
+- **~~No CI pipeline.~~ ✅ Resolved.** `.github/workflows/ci.yml` runs `npm run check` + `npm test` + a boot probe on Node 20.
 - **No accessibility audit.** Tracked.
 - **No error boundary in the UI.** Tracked.
 - **`localStorage`-only persistence.** Tracked.

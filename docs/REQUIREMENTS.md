@@ -65,7 +65,7 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 - "Rates & Limits" edits `Brand Metadata` for all five Brands (input rate, output rate, 5h cap, weekly cap). Invalid inputs (NaN, negative) are rejected; previous values are retained.
 - "API Tokens (Keys)" writes one of four allowed env keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GLM_API_KEY`, `MINIMAX_API_KEY`) to `.env` via a per-key endpoint.
 - API keys are returned masked (`****last4`) from `GET /api/env`. The full key is never sent to the browser.
-- **Known bug** (tracked in `../docs/REVIEWS.md` R3): the per-key writer still drops any `.env` keys outside the five-key whitelist. The author name `RTK_DB_PATH` is no longer relevant (RTK is gone), but the loss-of-custom-config behaviour remains for any other env keys the user adds.
+- **Known bug** (tracked in `../docs/REVIEWS.md` R3): ~~the per-key writer still drops any `.env` keys outside the five-key whitelist~~ **Resolved in Phase 1** — both env writers now read the full `.env`, merge only the four allowed keys, and write back the complete map, preserving siblings such as `RTK_DB_PATH`, `FIREBASE_*`, `WIFI_*`. Verified by `tests/envRoundTrip.test.js` (AC-21). Additionally, `GET /api/env` only ever returns the four provider keys (masked); non-whitelisted keys are never serialised to the browser.
 
 ### 2.5 Export
 
@@ -87,7 +87,8 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 
 - The dashboard fetches **live quota data** from each provider's API and caches it in the server-side `brand_quota` SQLite table. This is **distinct** from local spend — it is the vendor's authoritative view of how much quota is left.
 - **Per-Brand `unit` semantics**:
-  - `claude` and `glm` return `unit: "requests"` (count-based) with `limit_value` from response headers.
+  - `claude` returns `unit: "local"` — tracked purely via the RTK database (no Anthropic API call). Cost, tokens, requests, and rolling-window resets are all derived from local RTK rows; the bar/amounts/reset fall back to RTK cost-based data.
+  - `glm` returns `unit: "requests"` (count-based) with `limit_value` from response headers.
   - `minimax` returns `unit: "percent"` (0–100) from the `token_plan/remains` body. The fetcher synthesises `limit_value: 100` and reads `current_interval_remaining_percent` / `current_weekly_remaining_percent`.
   - `gemini` returns `unit: "not_exposed"` — no quota API, bar falls back to local spend.
 - **Cache lifecycle** (in `server.js` → `seedBrandQuotas()`):
@@ -135,7 +136,7 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 - `localStorage` only — no cross-restart persistence for Request history.
 - Cache model: the **disjoint model is applied** in `addRequest`, `fetchRealRTKData`, `connectRTKStream`, and `generateInitialMockHistory` per `../docs/adr/0003-cache-model-disjoint-input-and-saved.md`; the `SIM_HISTORY_PRELOAD` rows pre-dating the migration may still look inconsistent (Reviewer R5 scope).
 - `windowLabel` and `meta.limit` still in `DEFAULT_BRAND_METADATA` — see `../docs/adr/0004-fixed-rolling-windows.md` status and `../docs/REVIEWS.md` R3.
-- Env-var loss bug: per-key writer drops `.env` keys outside the five-key whitelist (now also affects `RTK_DB_PATH`, which Real RTK mode honours) — see `../docs/REVIEWS.md` R3.
+- Env-var loss: ~~per-key writer drops `.env` keys outside the five-key whitelist~~ **Resolved in Phase 1** — siblings preserved; `GET /api/env` exposes only the four provider keys. See `../docs/REVIEWS.md` R3.
 - No historical quota trend chart (only the current snapshot is shown).
 - i18n not in scope (limit labels are English-only).
 - No accessibility audit (keyboard nav, screen reader labels).
@@ -148,5 +149,5 @@ A single `state.requests: Request[]` array. The retention cap (`MAX_REQUESTS_RET
 - i18n (limit labels are English-only in v1).
 - Mobile / responsive layout beyond a desktop browser.
 - Multi-user, multi-tenant, authentication.
-- Network exposure; the dashboard runs on `localhost:3000` only.
+- Network exposure; the dashboard runs on `localhost:3838` only.
 - Kill-switch / auto-throttle when a limit is breached (v1 is monitor-only).

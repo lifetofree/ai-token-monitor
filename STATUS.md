@@ -21,7 +21,7 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 
 ## ⚙️ Running Configuration
 
-* **Local Port**: [http://localhost:3000](http://localhost:3000)
+* **Local Port**: [http://localhost:3838](http://localhost:3838)
 * **Storage**: `localStorage` (`atm_requests`, `atm_brand_metadata`, `atm_theme`, `atm_auto_sim`)
 * **Data sources** (dual monitor):
   * **Real RTK Monitor** (default): reads `~/Library/Application Support/rtk/history.db` (overridable via `RTK_DB_PATH`), served via `/api/rtk` (full snapshot) and `/api/rtk/stream` (SSE for incremental updates). **Custom-project ingest**: any project on this machine can `POST /api/rtk/ingest` to count its own LLM usage toward the dashboard.
@@ -48,8 +48,8 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 
 ### Security caveats
 
-- The per-key `/api/env/key` writer **drops** any `.env` keys outside the four-key whitelist on update. Tracked in `docs/REVIEWS.md` R3. `RTK_DB_PATH` (a non-whitelisted key the Real RTK mode honours via `process.env`) is one such key — adding it via the UI is silently lost; the user must set it via the shell.
-- The server binds to `0.0.0.0:3000` (Node default). Should be `127.0.0.1` in any deployment scenario; not a problem for a personal tool behind a CORS allowlist that already blocks cross-origin reads.
+- ~~The per-key `/api/env/key` writer dropped non-whitelisted `.env` keys on update.~~ **Resolved in Phase 1** — both env writers (`POST /api/env/key`, `POST /api/env`) now read the full existing `.env`, merge only the four allowed keys, and write back the complete map, preserving siblings such as `RTK_DB_PATH`, `FIREBASE_*`, `WIFI_*`. Verified by `tests/envRoundTrip.test.js` (AC-21). `GET /api/env` only ever returns the four provider keys (masked); other keys are never serialised to the browser.
+- The server binds to `127.0.0.1:3838` (loopback-only). No LAN exposure.
 
 ## ✅ Functional polish
 
@@ -80,21 +80,19 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 - **[README.md](./README.md)**: Project overview, setup guide, current Known Gaps.
 - **[.ai.agents/README.md](./.ai.agents/README.md)**: Concept and workflow details for the role-based multi-agent development team.
 - **[CONTEXT.md](./CONTEXT.md)**: Reference dictionary defining the project's ubiquitous language.
-- **[docs/](./docs/)**: Role-chain artifacts (BUSINESS_GOALS, REQUIREMENTS, USER_JOURNEY, TECH_STACK, SYSTEM_DESIGN, REVIEWS) plus `docs/adr/0001` through `0006`.
+- **[docs/](./docs/)**: Role-chain artifacts (BUSINESS_GOALS, REQUIREMENTS, USER_JOURNEY, TECH_STACK, SYSTEM_DESIGN, REVIEWS) plus `docs/adr/0001` through `0008` (0007: ESP32 Firebase companion display; 0008: Claude RTK-only, no Anthropic probe).
 - **[STATUS.md](./STATUS.md)**: Central state tracker showing role progress and status checkpoints.
 
 ---
 
 ## ❌ Known gaps
 
-- **Env-var loss bug**: per-key writer drops `.env` keys outside the four-key whitelist (including `RTK_DB_PATH` which the Real RTK mode honours) — see `docs/REVIEWS.md` R3
 - **Cache model in pre-populated history**: `generateInitialMockHistory()` and the cost path now use the disjoint model (per ADR-0003), but the pre-populated `SIM_HISTORY_PRELOAD` may still emit `inputTokens` values that look small relative to historical `savedTokens`; a follow-up audit is in the Reviewer's R5 scope
 - **`windowLabel` and `meta.limit` still in `DEFAULT_BRAND_METADATA`** — see ADR-0004 and `docs/REVIEWS.md` R3
 - `localStorage` only — no cross-restart persistence for Request history
 - Limit labels are hardcoded English; would need i18n
 - No accessibility audit (keyboard nav, screen reader labels)
 - No error boundary in the UI — a single failed fetch silently degrades the dashboard
-- `RTK_DB_PATH` honoured from `process.env` but not from `.env` due to the env-var-loss bug above
 - No historical quota trend chart (only current snapshot)
 
 ---

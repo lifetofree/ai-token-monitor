@@ -16,7 +16,7 @@ _Avoid_: Provider, Model, Vendor
 Aliases: "Provider" is acceptable in user-facing copy but never in data fields.
 
 **Brand Fetcher**:
-A per-Brand function in `server.js` that hits the provider's quota API and returns `{ remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, error }`. The `BRAND_FETCHERS` registry maps Brand key → fetcher. Fetchers are pure functions of the API key; the cache and invalidation live in `seedBrandQuotas()`.
+A per-Brand function in `server.js` that hits the provider's quota API (or, for Claude, reads the local RTK database) and returns `{ remaining, limit_value, reset_at, reset_at_weekly, weekly_remaining, unit, raw_json, error }`. The `BRAND_FETCHERS` registry maps Brand key → fetcher. Most fetchers are pure functions of the API key; Claude's fetcher is a pure function of the RTK spend metrics (no API key used) and returns `unit: 'local'`. The cache and invalidation live in `seedBrandQuotas()`.
 
 **Brand Metadata**:
 The per-Brand configuration: display name, Pricing, 5-Hour Spend Limit, and Weekly Spend Limit.
@@ -121,7 +121,7 @@ _Avoid_: 7d window, rolling weekly
 > **Domain expert:** "It was a synthetic entry representing personal-optimized traffic. Dropped in ADR-0001. The four real Brands are gemini, claude, minimax, and glm."
 
 > **Dev:** "How do I point the Real RTK reader at a different DB?"
-> **Domain expert:** "Set the `RTK_DB_PATH` env var before launching `node server.js`. Note that `/api/env/key` cannot write it — that endpoint is whitelisted to the four provider API keys only. The env-var-loss bug is tracked in R3."
+> **Domain expert:** "Set the `RTK_DB_PATH` env var before launching `node server.js`. The `/api/env/key` writer is whitelisted to the four provider API keys only, but it now preserves all sibling keys (including `RTK_DB_PATH`) across a write cycle — so you can keep it in `.env` safely. The env-var-loss bug that previously dropped siblings is resolved (see `docs/REVIEWS.md` R3, verified by `tests/envRoundTrip.test.js`). Note `GET /api/env` only ever returns the four provider keys (masked); `RTK_DB_PATH` is never serialised to the browser."
 
 ## Flagged ambiguities
 
