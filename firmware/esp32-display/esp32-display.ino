@@ -1,7 +1,6 @@
 #include <WiFi.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h> // ไลบรารีสำหรับควบคุมจอสี ST7789
+#include <Arduino_GFX_Library.h> // ไลบรารี Arduino_GFX สำหรับ JC3248W535C (AXS15231B QSPI)
 #include <SPI.h>
 #include <FirebaseESP32.h>
 #include <HTTPClient.h>
@@ -10,19 +9,45 @@
 #include <stdlib.h> // สำหรับใช้ฟังก์ชันแปลงข้อความเป็นเลข 64-bit (strtoll)
 
 // =====================================================================
-// Hardware pin config
+// Hardware pin config — Guition JC3248W535C_I_Y
+// ESP32-S3-N16R8 + AXS15231B QSPI 320x480 + capacitive touch
 // =====================================================================
-#define TFT_CS         14
-#define TFT_DC         27
-#define TFT_RST        33
-#define BUTTON_PIN     25
-#define DEBOUNCE_MS    50
-#define TFT_BL         32  // backlight
 
-// SPI hardware: MOSI=D23, SCLK=D18 (fixed for VSPI)
+// QSPI display bus
+#define GFX_BL          1
+// ไม่จำเป็นต้อง #define QSPI pins ที่นี่ เพราะระบุตรง bus object ด้านล่าง
 
-#define SCREEN_WIDTH   240
-#define SCREEN_HEIGHT  280
+// AXS15231B integrated capacitive touch (I2C)
+#define TOUCH_ADDR     0x3B
+#define TOUCH_SDA       4
+#define TOUCH_SCL       8
+#define TOUCH_I2C_CLOCK 400000
+#define TOUCH_RST_PIN  12
+#define TOUCH_INT_PIN   3
+#define AXS_MAX_TOUCH_NUMBER 1
+
+// ปรับทิศทาง touch ให้ตรงกับหน้าจอ (หากกดซ้าย/ขวา สลับกัน ให้เปลี่ยนค่าเหล่านี้)
+#define TOUCH_SWAP_AXES 1   // 1 = สลับแกน X/Y (required for landscape)
+#define TOUCH_FLIP_X    0   // 1 = กลับด้าน X
+#define TOUCH_FLIP_Y    1   // 1 = กลับด้าน Y (adjust if touch is mirrored)
+
+// Touch behavior
+#define HEADER_TAP_H   50     // แตะในเขต header = สลับ overview/settings
+
+#define SCREEN_WIDTH   480
+#define SCREEN_HEIGHT  320
+
+// =====================================================================
+// Display objects (QSPI + AXS15231B + Canvas framebuffer)
+// =====================================================================
+// JC3248W535C QSPI pinout: CS=45, CLK=47, D0=21, D1=48, D2=40, D3=39
+Arduino_DataBus *bus = new Arduino_ESP32QSPI(45, 47, 21, 48, 40, 39);
+Arduino_GFX *g = new Arduino_AXS15231B(bus, GFX_NOT_DEFINED, 0, false, 320, 480);
+// Canvas wrapper จำเป็นสำหรับ JC3248W535C (direct render ไม่เสถียร)
+// NOTE: Canvas dims MUST match the panel's NATIVE orientation (320x480) so that
+// flush() blits correctly. Landscape is achieved via gfx->setRotation(1) in setup(),
+// which rotates only the DRAWING space to 480x320 (SCREEN_WIDTH x SCREEN_HEIGHT).
+Arduino_Canvas *gfx = new Arduino_Canvas(320, 480, g, 0, 0, 0);
 
 // =====================================================================
 // WiFi + Firebase
@@ -33,8 +58,6 @@
 #ifndef WIFI_PASSWORD
   #define WIFI_PASSWORD WIFI_PASS
 #endif
-
-// Demo mode removed — loading screen is shown until first Firebase fetch succeeds
 
 // =====================================================================
 // Colors (RGB565) — match web dashboard dark mode (styles.css :root[data-theme=dark])
@@ -76,31 +99,106 @@ int currentIndex = 0;
 const int num_ai = 4;
 String aiKeys[] = {"gemini", "claude", "minimax", "glm"};
 
-// นิยามอ็อบเจกต์ของห้องสมุดสำหรับการคุมเครือข่ายและจอภาพ
-// หมายเหตุ: FirebaseConfig/Auth/Data ถูกลบออกแล้ว — เราใช้ HTTPClient REST API
-// แทนการเรียก Firebase streaming client เพื่อประหยัดแฟลช (FirebaseESP32 client หนักมาก)
-
-Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-
-unsigned long lastDebounce = 0;
-bool lastButtonState = HIGH;
 bool useFirebase = false;
-
-// ตัวแปรจับเวลาอัปเดตข้อมูลบนคลาวด์แบบ Global เพื่อความถูกต้องของระบบ
 unsigned long lastRefresh = 0;
 
-// ─── Display Mode ───────────────────────────────────────────────────
-#define MODE_MANUAL    0
-#define MODE_AUTO      1
-#define AUTO_INTERVAL  5000   // ms between auto page swaps
-
-int displayMode = MODE_MANUAL;      // current display mode
 bool dataFetched = false;           // true after first successful Firebase fetch
-unsigned long lastAutoSwap = 0;     // timer for auto-swap
+bool wifiEverConnected = false;     // true once we've connected at least once
 
-// ─── Button Long-Press Detection ───────────────────────────────────
-unsigned long buttonPressStart = 0;
-bool buttonLongFired = false;
+// ─── Display State (which screen is shown) ───────────────────────────
+enum DisplayState { STATE_OVERVIEW, STATE_SETTINGS };
+int displayState = STATE_OVERVIEW;
+
+// ─── Settings (persisted in RAM only; re-applied on boot) ───────────
+int brightnessLevel = 3;  // 0..3 -> 25 / 50 / 75 / 100 %
+const int brightnessPct[4] = {25, 50, 75, 100};
+#define LEDC_FREQ     5000
+#define LEDC_RES      8
+int ledcChannel = -1;
+
+// ─── Touch State ───────────────────────────────────────────────────
+bool touchActive = false;
+uint16_t touchStartX = 0, touchStartY = 0;
+unsigned long lastTapTime = 0;
+const unsigned long TAP_DEBOUNCE_MS = 250;
+
+// ─── Clock (refreshed from NTP time) ────────────────────────────────
+unsigned long lastClockRefresh = 0;
+const unsigned long CLOCK_REFRESH_MS = 1000;
+String clockText = "--:--";
+String dateText = "--- --";
+
+// =====================================================================
+// 🖐️ AXS15231B Capacitive Touch Driver (I2C, integrated in display chip)
+// =====================================================================
+
+void axs_touch_init() {
+  Wire.begin(TOUCH_SDA, TOUCH_SCL);
+  Wire.setClock(TOUCH_I2C_CLOCK);
+
+  if (TOUCH_RST_PIN >= 0) {
+    pinMode(TOUCH_RST_PIN, OUTPUT);
+    digitalWrite(TOUCH_RST_PIN, LOW);
+    delay(200);
+    digitalWrite(TOUCH_RST_PIN, HIGH);
+    delay(200);
+  }
+
+  if (TOUCH_INT_PIN >= 0) {
+    pinMode(TOUCH_INT_PIN, INPUT_PULLUP);
+  }
+
+  Wire.beginTransmission(TOUCH_ADDR);
+  if (Wire.endTransmission() != 0) {
+    Serial.println("[TOUCH] AXS15231B touch not found on I2C bus");
+  } else {
+    Serial.println("[TOUCH] AXS15231B touch ready");
+  }
+}
+
+bool axs_touch_read(uint16_t *x, uint16_t *y) {
+  uint8_t data[AXS_MAX_TOUCH_NUMBER * 6 + 2] = {0};
+
+  const uint8_t read_cmd[11] = {
+    0xb5, 0xab, 0xa5, 0x5a, 0x00, 0x00,
+    (uint8_t)((AXS_MAX_TOUCH_NUMBER * 6 + 2) >> 8),
+    (uint8_t)((AXS_MAX_TOUCH_NUMBER * 6 + 2) & 0xff),
+    0x00, 0x00, 0x00
+  };
+
+  Wire.beginTransmission(TOUCH_ADDR);
+  Wire.write(read_cmd, 11);
+  if (Wire.endTransmission() != 0) return false;
+
+  if (Wire.requestFrom(TOUCH_ADDR, (uint8_t)sizeof(data)) != sizeof(data)) return false;
+  for (size_t i = 0; i < sizeof(data); i++) {
+    data[i] = Wire.read();
+  }
+
+  if (data[1] == 0 || data[1] > AXS_MAX_TOUCH_NUMBER) return false;
+
+  uint16_t rawX = ((data[2] & 0x0F) << 8) | data[3];
+  uint16_t rawY = ((data[4] & 0x0F) << 8) | data[5];
+
+  uint16_t tx = rawX;
+  uint16_t ty = rawY;
+
+#if TOUCH_SWAP_AXES
+  uint16_t tmp = tx; tx = ty; ty = tmp;
+#endif
+#if TOUCH_FLIP_X
+  tx = SCREEN_WIDTH - 1 - tx;
+#endif
+#if TOUCH_FLIP_Y
+  ty = SCREEN_HEIGHT - 1 - ty;
+#endif
+
+  if (tx >= SCREEN_WIDTH || ty >= SCREEN_HEIGHT) return false;
+
+  if (x) *x = tx;
+  if (y) *y = ty;
+  return true;
+}
 
 // =====================================================================
 // 🚀 ฟังก์ชันช่วยเหลือทางระบบ (System Utility Functions)
@@ -125,40 +223,28 @@ String getResetString(long long resetAt) {
   }
 }
 
-// คืนค่าระดับสีของเกจวัดพลังงานตาม % โควต้าคงเหลือ (เขียว -> ส้มอมเหลือง -> แดงเตือนภัย)
 uint16_t getProgressBarColor(int percent) {
-  if (percent > 50)  return 0x07E0; // สัญญาณพลังงานสีเขียวปกติ
-  if (percent > 20)  return 0xFDA0; // สัญญาณพลังงานสีส้มอมเหลืองเริ่มลดต่ำ
-  return 0xF800;                    // สัญญาณพลังงานสีแดงขั้นวิกฤตใกล้หมดโควต้า
+  if (percent > 50)  return 0x07E0;
+  if (percent > 20)  return 0xFDA0;
+  return 0xF800;
 }
 
-// ฟังก์ชันช่วยสกัดยอดตัวเลข 64-bit (long long) จากข้อมูลดิบ FirebaseJson
-// หมายเหตุ: FirebaseJson รายงานตัวเลขที่ > 2^31 (เช่น Unix timestamp ~1.75B)
-// ว่าเป็นประเภท "uint" ไม่ใช่ "int" — ต้องจัดการแยกต่างหาก
-// ใช้ stringValue เป็น fallback สากลเพื่อหลีกเลี่ยงปัญหา precision loss ของ double
 long long getJsonInt64(FirebaseJson &json, const String &path) {
   FirebaseJsonData jsonData;
   if (json.get(jsonData, path.c_str())) {
-    // "uint" — FirebaseJson uses this for values > 2,147,483,647 (e.g. Unix timestamps)
     if (jsonData.type == "uint") {
-      // stringValue is the safest — avoids double precision loss on large ints
       if (jsonData.stringValue.length() > 0) {
         return strtoll(jsonData.stringValue.c_str(), NULL, 10);
       }
-      // Cast through uint32_t first to correctly reconstruct the unsigned value
-      // (intValue is int32; a value like 3841186453 is stored as -453780843 due to overflow)
       return (long long)(uint32_t)jsonData.intValue;
     }
     if (jsonData.type == "int") {
-      // intValue is int32; large values (e.g. timestamps > 2^31) overflow to
-      // negative. Use stringValue as the reliable source, same as "uint" branch.
       if (jsonData.stringValue.length() > 0) {
         return strtoll(jsonData.stringValue.c_str(), NULL, 10);
       }
       return (long long)jsonData.intValue;
     }
     if (jsonData.type == "double" || jsonData.type == "float") {
-      // Use stringValue first if available to avoid floating-point truncation
       if (jsonData.stringValue.length() > 0) {
         return strtoll(jsonData.stringValue.c_str(), NULL, 10);
       }
@@ -176,42 +262,152 @@ void drawWiFiSignal(int x, int y) {
   if (WiFi.status() == WL_CONNECTED) {
     long rssi = WiFi.RSSI();
     int bars = 1;
-    if (rssi > -55) bars = 4;       
-    else if (rssi > -67) bars = 3;  
-    else if (rssi > -78) bars = 2;  
-    
-    tft.fillRect(x,     y + 9,  3, 3, COLOR_NET_OK);
-    tft.fillRect(x + 5, y + 6,  3, 6, (bars >= 2) ? COLOR_NET_OK : COLOR_CARD_BG);
-    tft.fillRect(x + 10, y + 3, 3, 9, (bars >= 3) ? COLOR_NET_OK : COLOR_CARD_BG);
-    tft.fillRect(x + 15, y,     3, 12, (bars >= 4) ? COLOR_NET_OK : COLOR_CARD_BG);
+    if (rssi > -55) bars = 4;
+    else if (rssi > -67) bars = 3;
+    else if (rssi > -78) bars = 2;
+
+    gfx->fillRect(x,     y + 14, 4,  4, COLOR_NET_OK);
+    gfx->fillRect(x + 6, y + 9,  4,  9, (bars >= 2) ? COLOR_NET_OK : COLOR_CARD_BG);
+    gfx->fillRect(x + 12,y + 4,  4, 14, (bars >= 3) ? COLOR_NET_OK : COLOR_CARD_BG);
+    gfx->fillRect(x + 18,y,      4, 18, (bars >= 4) ? COLOR_NET_OK : COLOR_CARD_BG);
   } else {
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_NET_FAIL);
-    tft.setCursor(x + 5, y + 2);
-    tft.print("x");
+    gfx->setTextSize(1);
+    gfx->setTextColor(COLOR_NET_FAIL);
+    gfx->setCursor(x + 5, y + 4);
+    gfx->print("x");
   }
 }
 
 // =====================================================================
-// Card layout (240x280) — matches web dashboard brand-card
+// 🕐 Clock helpers (NTP-synced)
+// =====================================================================
+String getClockText() {
+  time_t now = time(nullptr);
+  if (now < 1000000000L) return "--:--";
+  struct tm* t = localtime(&now);
+  char buf[6];
+  strftime(buf, sizeof(buf), "%H:%M", t);
+  return String(buf);
+}
+
+String getDateText() {
+  time_t now = time(nullptr);
+  if (now < 1000000000L) return "--- --";
+  struct tm* t = localtime(&now);
+  char buf[16];
+  strftime(buf, sizeof(buf), "%a %d %b", t);
+  return String(buf);
+}
+
+void refreshClock() {
+  String newClock = getClockText();
+  String newDate  = getDateText();
+  if (newClock != clockText || newDate != dateText) {
+    clockText = newClock;
+    dateText  = newDate;
+  }
+}
+
+// =====================================================================
+// 💡 Brightness control (LEDC PWM on GFX_BL pin)
+// =====================================================================
+void applyBrightnessLevel() {
+  int pct = brightnessPct[brightnessLevel];
+  if (pct < 0)   pct = 0;
+  if (pct > 100) pct = 100;
+  int duty = (pct * 255) / 100;
+  if (ledcChannel >= 0) {
+    ledcWrite(ledcChannel, duty);
+  }
+}
+
+// =====================================================================
+// 🎨 Brand Icons (vector-style, drawn at any size in `color`)
+// =====================================================================
+// brandIndex: 0=Antigravity, 1=Claude, 2=MiniMax, 3=GLM
+void drawBrandIcon(int brandIndex, int x, int y, int size, uint16_t color) {
+  int cx = x + size / 2;
+  int cy = y + size / 2;
+  int r  = size / 2 - 1;
+  const float PI_F = 3.14159265f;
+
+  switch (brandIndex) {
+    case 0: { // Antigravity/Gemini — 4-pointed star
+      gfx->drawLine(cx, cy - r, cx, cy + r, color);
+      gfx->drawLine(cx - r, cy, cx + r, cy, color);
+      int d = (r * 7) / 10;
+      gfx->drawLine(cx - d, cy - d, cx + d, cy + d, color);
+      gfx->drawLine(cx - d, cy + d, cx + d, cy - d, color);
+      gfx->fillCircle(cx, cy, 2, color);
+      break;
+    }
+    case 1: { // Claude — 6-pointed asterisk
+      for (int i = 0; i < 6; i++) {
+        float angle = (i * PI_F) / 3.0f;
+        int x1 = cx + (int)(r * cosf(angle));
+        int y1 = cy + (int)(r * sinf(angle));
+        gfx->drawLine(cx, cy, x1, y1, color);
+      }
+      gfx->fillCircle(cx, cy, 2, color);
+      break;
+    }
+    case 2: { // MiniMax — sine wave
+      bool first = true;
+      int prevY = cy;
+      for (int dx = -r; dx <= r; dx++) {
+        float t = (float)dx / (float)r * PI_F * 1.5f;
+        int dy = (int)(sinf(t) * (r * 0.5f));
+        int px = cx + dx;
+        int py = cy + dy;
+        if (!first) gfx->drawLine(px - 1, prevY, px, py, color);
+        prevY = py;
+        first = false;
+      }
+      break;
+    }
+    case 3: { // GLM — 4 dots
+      int d = (r * 5) / 10;
+      int dotR = (r * 25) / 100;
+      if (dotR < 2) dotR = 2;
+      gfx->fillCircle(cx - d, cy - d, dotR, color);
+      gfx->fillCircle(cx + d, cy - d, dotR, color);
+      gfx->fillCircle(cx - d, cy + d, dotR, color);
+      gfx->fillCircle(cx + d, cy + d, dotR, color);
+      break;
+    }
+  }
+}
+
+void drawAppLogo(int cx, int cy, int radius, uint16_t ringColor, uint16_t textColor) {
+  gfx->drawCircle(cx, cy, radius, ringColor);
+  gfx->drawCircle(cx, cy, radius - 1, ringColor);
+  gfx->setTextSize(3);
+  gfx->setTextColor(textColor);
+  gfx->setCursor(cx - 18, cy - 12);
+  gfx->print("AI");
+}
+
+// =====================================================================
+// Card layout (480x320) — Landscape Overview
 // =====================================================================
 
-#define CARD_X         6
-#define CARD_Y         6
-#define CARD_W         228
-#define CARD_H         268
-#define CARD_RADIUS    10
-#define ACCENT_H       34
-#define CONTENT_X      14
-#define BAR_X          14
-#define BAR_W          212
-#define BAR_H          16
-#define CHAR_W_SIZE3   18
-#define CHAR_W_SIZE2   12
+#define HEADER_H       36
+#define FOOTER_H       30
+#define FOOTER_Y       (SCREEN_HEIGHT - FOOTER_H)  // 290
+#define CARD_X_START   8
+#define CARD_Y_START   42
+#define CARD_W         228                          // (480 - 8*3) / 2
+#define CARD_H         120
+#define CARD_GAP       4
+#define CARD_R         12
+#define BAR_H          12
 #define CHAR_W_SIZE1   6
-#define STAT_COL_W     70
+#define CHAR_W_SIZE2   12
+#define CHAR_W_SIZE3   18
+#define CHAR_W_SIZE4   24
+#define STAT_COL_W     60
 
-// คำนวณเปอร์เซ็นต์คงเหลือ (clamp 0..100) จากโควต้า
+// ─── helpers ────────────────────────────────────────────────────────
 int calcRemainingPct(const QuotaDetails& q) {
   if (q.total <= 0) return 0;
   int pct = (int)((q.remaining * 100) / q.total);
@@ -220,11 +416,10 @@ int calcRemainingPct(const QuotaDetails& q) {
   return pct;
 }
 
-// คำนวณเวลา "รีเซ็ต ณ เวลา" ในรูปแบบ HH:MM (ต้องซิงค์ NTP ก่อน) หรือคืน "--:--"
 String formatAbsoluteReset(long long resetAt) {
   if (resetAt <= 0) return "--:--";
   time_t now = time(nullptr);
-  if (now < 1000000000L) return "--:--";  // ยังไม่ได้ซิงค์ NTP
+  if (now < 1000000000L) return "--:--";
   long long secsLeft = resetAt - (long long)now;
   if (secsLeft <= 0) return "now";
   time_t t = (time_t)resetAt;
@@ -234,7 +429,6 @@ String formatAbsoluteReset(long long resetAt) {
   return String(buf);
 }
 
-// คำนวณเวลา "รีเซ็ต ณ เวลา" ในรูปแบบ "Sun 22:00" สำหรับโควต้ารายสัปดาห์
 String formatAbsoluteResetWithDay(long long resetAt) {
   if (resetAt <= 0) return "-- --:--";
   time_t now = time(nullptr);
@@ -248,14 +442,12 @@ String formatAbsoluteResetWithDay(long long resetAt) {
   return String(buf);
 }
 
-// วาดเส้นประแบ่งส่วน (Dashed Divider) ตามแนวนอน
-void drawDashedHLine(int x, int y, int w, uint16_t color) {
-  for (int dx = 0; dx < w; dx += 6) {
-    tft.drawFastHLine(x + dx, y, 3, color);
-  }
+uint16_t getBarColorForPct(int pct, uint16_t brandColor) {
+  if (pct <= 20) return 0xF800;
+  if (pct <= 50) return 0xFDA0;
+  return brandColor;
 }
 
-// ย่อตัวเลขโควต้าให้สั้นและอ่านง่าย (1_500_000 -> "1.5M", 48_000 -> "48k", 500 -> "500")
 String fmtTokenCount(long long val) {
   if (val <= 0) return "0";
   if (val >= 1000000000LL) {
@@ -274,235 +466,409 @@ String fmtTokenCount(long long val) {
   return String(val);
 }
 
-// เลือกสีของ Progress Bar ตามลำดับความสำคัญ: สีแบรนด์ > เหลืองเตือน > แดงวิกฤต
-uint16_t getBarColorForPct(int pct, uint16_t brandColor) {
-  if (pct <= 20) return 0xF800;           // แดง - โควต้าใกล้หมด
-  if (pct <= 50) return 0xFDA0;           // ส้มอมเหลือง - เริ่มเหลือน้อย
-  return brandColor;                       // ปกติ - ใช้สีแบรนด์ (เหมือนเว็บ)
+// วาด Progress Bar แนวนอนแบบบาง (rounded, ใช้ซ้ำในทุกหน้า)
+void drawProgressBarH(int x, int y, int w, int h, int pct, uint16_t brandColor) {
+  if (pct < 0)   pct = 0;
+  if (pct > 100) pct = 100;
+  uint16_t barColor = getBarColorForPct(pct, brandColor);
+  gfx->fillRoundRect(x, y, w, h, h / 2, COLOR_DARK_BG);
+  gfx->drawRoundRect(x, y, w, h, h / 2, COLOR_BORDER);
+  int fillW = (pct * (w - 2)) / 100;
+  if (fillW > 0) {
+    gfx->fillRoundRect(x + 1, y + 1, fillW, h - 2, (h - 2) / 2, barColor);
+  }
 }
 
-// วาดส่วนโควต้า (5-Hour / Weekly) สไตล์ Web Dashboard — แต่ละ section สูง 96px
-// Layout (relative to yStart):
-//   +0  : section title (size 1, muted)
-//   +12 : big % number (size 3, colored) + "remaining" label (size 1, muted)
-//   +40 : progress bar (16px)
-//   +64 : stats row labels: Used | Left | Total (size 1, muted)
-//   +74 : stats row values (size 1, colored)
-//   +88 : reset time left-aligned, countdown right-aligned (size 1, muted)
-void drawQuotaSection(int yStart, const char* title, const QuotaDetails& q, bool isWeekly, uint16_t brandColor) {
-  int pct = calcRemainingPct(q);
-  uint16_t barColor = getBarColorForPct(pct, brandColor);
-  String countdown = getResetString(q.reset_at);
-  String absoluteTime = isWeekly
-    ? formatAbsoluteResetWithDay(q.reset_at)
-    : formatAbsoluteReset(q.reset_at);
+// =====================================================================
+// 🧭 Header (clock + date + WiFi)
+// =====================================================================
+void drawHeader() {
+  gfx->fillRect(0, 0, SCREEN_WIDTH, HEADER_H, COLOR_CARD_BG);
+  gfx->drawFastHLine(0, HEADER_H - 1, SCREEN_WIDTH, COLOR_BORDER);
 
-  // DEBUG: log reset row values to Serial Monitor
-  Serial.printf("[DRAW] %s | reset_at=%lld | resetY=%d | abs='%s' | cdown='%s'\n",
-                title, q.reset_at, yStart + 88, absoluteTime.c_str(), countdown.c_str());
+  // Clock (left, size 3 = 24px)
+  gfx->setTextSize(3);
+  gfx->setTextColor(COLOR_WHITE);
+  gfx->setCursor(12, 4);
+  gfx->print(clockText);
 
-  // แถว 1: ชื่อหมวด (size 1, muted)
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TXT_MUTED);
-  tft.setCursor(CONTENT_X, yStart);
-  tft.print(title);
+  // Date (right of clock, size 1)
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(130, 14);
+  gfx->print(dateText);
 
-  // แถว 2: เปอร์เซ็นต์ขนาดใหญ่ (size 3 = 24px) + "remaining" ชิดขวาตัวเลข
+  // WiFi (right top, centered vertically)
+  drawWiFiSignal(SCREEN_WIDTH - 40, 6);
+}
+
+// =====================================================================
+// 📊 Footer (hint bar)
+// =====================================================================
+void drawFooter() {
+  gfx->fillRect(0, FOOTER_Y, SCREEN_WIDTH, FOOTER_H, COLOR_CARD_BG);
+  gfx->drawFastHLine(0, FOOTER_Y, SCREEN_WIDTH, COLOR_BORDER);
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(12, FOOTER_Y + 12);
+  gfx->print(displayState == STATE_OVERVIEW
+             ? "tap top: settings"
+             : "tap top: overview | tap row: change");
+}
+
+// =====================================================================
+// 🪟 Compact brand card (1 cell of 2x2 grid)
+// =====================================================================
+void drawBrandRow(int x, int y, int brandIndex, const AIData& data) {
+  int w = CARD_W;
+  int h = CARD_H;
+
+  // Card background + border
+  gfx->fillRoundRect(x, y, w, h, CARD_R, COLOR_CARD_BG);
+  gfx->drawRoundRect(x, y, w, h, CARD_R, COLOR_BORDER);
+
+  // Left brand-color accent stripe
+  gfx->fillRect(x, y + 10, 4, h - 20, data.brand_color);
+
+  int ix = x + 18;   // more horizontal padding
+  int iw = w - 34;   // 194
+
+  int pct5h = calcRemainingPct(data.quota5h);
+  int pctWk = calcRemainingPct(data.quotaWeekly);
+  uint16_t pct5hColor = getBarColorForPct(pct5h, data.brand_color);
+  uint16_t pctWkColor = getBarColorForPct(pctWk, data.brand_color);
   char pctStr[8];
-  sprintf(pctStr, "%d%%", pct);
-  tft.setTextSize(3);
-  tft.setTextColor(barColor);
-  tft.setCursor(CONTENT_X, yStart + 12);
-  tft.print(pctStr);
 
-  // "remaining" label — baseline-aligned กับตัวเลขใหญ่
-  int bigPctW = strlen(pctStr) * CHAR_W_SIZE3;
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TXT_MUTED);
-  tft.setCursor(CONTENT_X + bigPctW + 4, yStart + 28);
-  tft.print("remaining");
+  // ── Header: icon + brand name (size 2 for readability) ──────────
+  int iconSize = 20;
+  drawBrandIcon(brandIndex, ix, y + 4, iconSize, data.brand_color);
+  gfx->setTextSize(2);
+  gfx->setTextColor(COLOR_WHITE);
+  gfx->setCursor(ix + iconSize + 10, y + 8);
+  gfx->print(data.name);
 
-  // แถว 3: Progress Bar (BAR_H=16, rounded)
-  int barY = yStart + 40;
-  tft.drawRoundRect(BAR_X, barY, BAR_W, BAR_H, 4, COLOR_BORDER);
-  int fillW = (pct * (BAR_W - 4)) / 100;
-  if (fillW > 0) {
-    tft.fillRoundRect(BAR_X + 2, barY + 2, fillW, BAR_H - 4, 3, barColor);
-  }
+  // ── 5H quota block ───────────────────────────────────────────────
+  // label (left) + big % (right)
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(ix, y + 36);
+  gfx->print("5-HOUR");
 
-  // แถว 4: สถิติ 3 คอลัมน์ — Used | Left | Total
-  // เมื่อ total==100 หมายถึง % mode: เติม "%" ต่อท้ายทุกค่าเพื่อความชัดเจน
-  int statsY = barY + BAR_H + 8;  // yStart + 64
-  String sfx = (q.total == 100) ? "%" : "";
+  gfx->setTextSize(2);
+  gfx->setTextColor(pct5hColor);
+  sprintf(pctStr, "%d%%", pct5h);
+  int pctW = strlen(pctStr) * CHAR_W_SIZE2;
+  gfx->setCursor(ix + iw - pctW, y + 32);
+  gfx->print(pctStr);
 
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TXT_MUTED);
-  tft.setCursor(CONTENT_X,                 statsY); tft.print("Used");
-  tft.setCursor(CONTENT_X + STAT_COL_W,   statsY); tft.print("Left");
-  tft.setCursor(CONTENT_X + STAT_COL_W*2, statsY); tft.print("Total");
+  drawProgressBarH(ix, y + 48, iw, 12, pct5h, data.brand_color);
 
-  tft.setCursor(CONTENT_X,                 statsY + 10);
-  tft.setTextColor(COLOR_WHITE);
-  tft.print(fmtTokenCount(q.used) + sfx);
+  // ── Weekly quota block ───────────────────────────────────────────
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(ix, y + 70);
+  gfx->print("WEEKLY");
 
-  tft.setCursor(CONTENT_X + STAT_COL_W,   statsY + 10);
-  tft.setTextColor(barColor);
-  tft.print(fmtTokenCount(q.remaining) + sfx);
+  gfx->setTextSize(2);
+  gfx->setTextColor(pctWkColor);
+  sprintf(pctStr, "%d%%", pctWk);
+  pctW = strlen(pctStr) * CHAR_W_SIZE2;
+  gfx->setCursor(ix + iw - pctW, y + 66);
+  gfx->print(pctStr);
 
-  tft.setCursor(CONTENT_X + STAT_COL_W*2, statsY + 10);
-  tft.setTextColor(COLOR_WHITE);
-  tft.print(fmtTokenCount(q.total) + sfx);
+  drawProgressBarH(ix, y + 82, iw, 12, pctWk, data.brand_color);
 
-  // แถว 5: เวลารีเซ็ต — เวลาจริงซ้าย, นับถอยหลังขวา
-  int resetY = statsY + 24;  // yStart + 88
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TXT_MUTED);
-  tft.setCursor(CONTENT_X, resetY);
-  tft.print("Reset ");
-  tft.print(absoluteTime);
+  // ── Reset info (size 1) ──────────────────────────────────────────
+  String absoluteTime = formatAbsoluteReset(data.quota5h.reset_at);
+  String countdown    = getResetString(data.quota5h.reset_at);
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(ix, y + 100);
+  gfx->print("reset ");
+  gfx->print(absoluteTime);
 
   String inStr = "in " + countdown;
   int inW = inStr.length() * CHAR_W_SIZE1;
-  tft.setCursor(CARD_X + CARD_W - CONTENT_X - inW, resetY);
-  tft.print(inStr);
+  gfx->setCursor(ix + iw - inW, y + 100);
+  gfx->print(inStr);
 }
 
-// วาดการ์ดแบรนด์สไตล์ Web Dashboard บนจอ 240×280
-// Vertical layout (absolute y):
-//   y=6..40   : Header accent stripe (ACCENT_H=34) — brand name / page / WiFi
-//   y=42      : separator line
-//   y=50..146 : 5-HOUR QUOTA section (96px)
-//   y=152     : dashed divider
-//   y=160..256: WEEKLY QUOTA section (96px)
-//   y=262     : footer hint
-void drawUnifiedCard(int index) {
-  tft.fillScreen(COLOR_DARK_BG);
-  AIData data = aiData[index];
+// =====================================================================
+// 📺 Overview Screen — 2x2 grid of brand cards
+// =====================================================================
+void drawOverviewScreen() {
+  gfx->fillScreen(COLOR_DARK_BG);
+  drawHeader();
 
-  // ย่อชื่อแบรนด์หากยาวเกิน 8 ตัวอักษรและมีช่องว่าง
-  String shortName = data.name;
-  if (shortName.length() > 8 && shortName.indexOf(" ") != -1) {
-    shortName = shortName.substring(0, shortName.indexOf(" "));
+  for (int row = 0; row < 2; row++) {
+    int y = CARD_Y_START + row * (CARD_H + CARD_GAP);
+    for (int col = 0; col < 2; col++) {
+      int x = CARD_X_START + col * (CARD_W + CARD_GAP);
+      int idx = row * 2 + col;
+      drawBrandRow(x, y, idx, aiData[idx]);
+    }
   }
 
-  // 1. พื้นหลังการ์ด (rounded rect เต็ม)
-  tft.fillRoundRect(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_RADIUS, COLOR_CARD_BG);
-
-  // 2. แถบสีแบรนด์ด้านบน (ACCENT_H=34) — round top, straight bottom
-  tft.fillRoundRect(CARD_X, CARD_Y, CARD_W, ACCENT_H, CARD_RADIUS, data.brand_color);
-  tft.fillRect(CARD_X, CARD_Y + ACCENT_H / 2, CARD_W, ACCENT_H / 2, data.brand_color);
-
-  // 3. ชื่อแบรนด์ (size 2 = 16px tall, vertically centered in header)
-  int nameY = CARD_Y + (ACCENT_H - 16) / 2;  // = 6 + 9 = 15
-  tft.setTextColor(COLOR_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(CONTENT_X, nameY);
-  tft.print(shortName);
-
-  // 4. Page indicator (right-aligned, before WiFi icon)
-  char pageStr[8];
-  sprintf(pageStr, "%d/%d", index + 1, num_ai);
-  int pageW = strlen(pageStr) * CHAR_W_SIZE2;
-  tft.setCursor(CARD_X + CARD_W - CONTENT_X - pageW - 22, nameY);
-  tft.print(pageStr);
-
-  // 5. WiFi icon (vertically centered, WiFi bars span 12px height)
-  drawWiFiSignal(CARD_X + CARD_W - 20, CARD_Y + (ACCENT_H - 12) / 2);
-
-  // 6. เส้นแบ่งระหว่างหัวและเนื้อหา
-  tft.drawFastHLine(CARD_X + 2, CARD_Y + ACCENT_H + 2, CARD_W - 4, COLOR_BORDER);
-
-  // 7. ส่วน 5-HOUR QUOTA (yStart=50, height=96 → ends at 146)
-  int y5h = CARD_Y + ACCENT_H + 10;  // = 6 + 34 + 10 = 50
-  drawQuotaSection(y5h, "5-HOUR QUOTA", data.quota5h, false, data.brand_color);
-
-  // 8. เส้นประแบ่งกลาง (y=152)
-  int divY = y5h + 96 + 6;  // = 50 + 96 + 6 = 152
-  drawDashedHLine(CONTENT_X, divY, CARD_W - CONTENT_X * 2, COLOR_BORDER);
-
-  // 9. ส่วน WEEKLY QUOTA (yStart=160, height=96 → ends at 256)
-  int yWk = divY + 8;  // = 160
-  drawQuotaSection(yWk, "WEEKLY QUOTA", data.quotaWeekly, true, data.brand_color);
-
-  // 10. Footer hint (y=262)
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TXT_MUTED);
-  const char* hint = (displayMode == MODE_AUTO) ? "[ auto ] [ hold 3s = manual ]" : "[ press ] [ hold 3s = auto ]";  
-  int hintW = strlen(hint) * CHAR_W_SIZE1;
-  tft.setCursor((SCREEN_WIDTH - hintW) / 2, CARD_Y + CARD_H - 12);
-  tft.print(hint);
-}
-
-// เก็บ drawStackedDualUI ไว้เป็น alias เพื่อไม่ให้กระทบส่วนอื่น
-void drawStackedDualUI(int index) {
-  drawUnifiedCard(index);
+  drawFooter();
+  gfx->flush();
 }
 
 // =====================================================================
-// 🔃 Loading Screen & Mode Toast
+// ⚙️ Settings row (used inside drawSettingsScreen)
+// x, y, w = position and width; label, value, sublabel rendered top to bottom
 // =====================================================================
+void drawSettingRow(int x, int y, int w, const char* label, const char* value, uint16_t valueColor, const char* sublabel = nullptr) {
+  int h = CARD_H;
 
-// แสดงหน้าจอโหลดขณะรอข้อมูลจาก Firebase (ก่อน dataFetched == true)
-void drawLoadingScreen() {
-  tft.fillScreen(COLOR_DARK_BG);
-  tft.fillRoundRect(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_RADIUS, COLOR_CARD_BG);
-  // Header bar
-  tft.fillRoundRect(CARD_X, CARD_Y, CARD_W, ACCENT_H, CARD_RADIUS, COLOR_BORDER);
-  tft.fillRect(CARD_X, CARD_Y + ACCENT_H / 2, CARD_W, ACCENT_H / 2, COLOR_BORDER);
-  tft.setTextColor(COLOR_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(CONTENT_X, CARD_Y + (ACCENT_H - 16) / 2);
-  tft.print("AI Monitor");
-  drawWiFiSignal(CARD_X + CARD_W - 20, CARD_Y + (ACCENT_H - 12) / 2);
-  // Loading text
-  tft.setTextSize(2);
-  tft.setTextColor(COLOR_TXT_MUTED);
-  tft.setCursor(50, 120);
-  tft.print("Loading...");
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TXT_MUTED);
-  tft.setCursor(30, 152);
-  tft.print("Fetching token data...");
-  tft.setCursor(30, 167);
-  tft.print("Please wait");
+  gfx->fillRoundRect(x, y, w, h, CARD_R, COLOR_CARD_BG);
+  gfx->drawRoundRect(x, y, w, h, CARD_R, COLOR_BORDER);
+
+  int ix = x + 14;
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(ix, y + 14);
+  gfx->print(label);
+
+  gfx->setTextSize(3);
+  gfx->setTextColor(valueColor);
+  gfx->setCursor(ix, y + 34);
+  gfx->print(value);
+
+  if (sublabel != nullptr) {
+    gfx->setTextSize(1);
+    gfx->setTextColor(COLOR_TXT_MUTED);
+    gfx->setCursor(ix, y + 70);
+    gfx->print(sublabel);
+  }
 }
 
-// แสดง Toast 1 วินาทีแจ้งโหมดที่เปลี่ยนไปหลังกดค้าง 3 วินาที
-void drawModeToast() {
-  tft.fillRect(0, 0, SCREEN_WIDTH, 28, COLOR_CARD_BG);
-  tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_BORDER);
-  tft.setTextSize(1);
-  tft.setCursor(10, 10);
-  if (displayMode == MODE_AUTO) {
-    tft.setTextColor(BRAND_GEMINI);
-    tft.print("AUTO MODE  ");
-    tft.setTextColor(COLOR_TXT_MUTED);
-    tft.print("(swap every 5s)");
+// =====================================================================
+// ⚙️ Settings Screen
+// ┌───────────────────────────────────────┐
+// │ [BRIGHTNESS]    │ [REFRESH]             │
+// │ 75%             │  -> tap               │
+// ├───────────────────────────────────────┤
+// │ [WIFI]                                │
+// │ 3PhonHome 2G  -55dBm                  │
+// │ 192.168.1.42                          │
+// └───────────────────────────────────────┘
+// =====================================================================
+void drawSettingsScreen() {
+  gfx->fillScreen(COLOR_DARK_BG);
+  drawHeader();
+
+  int y = CARD_Y_START;
+  int halfW = CARD_W;                               // 228
+  int fullW = SCREEN_WIDTH - CARD_X_START * 2;       // 464
+  int rightX = CARD_X_START + halfW + CARD_GAP;      // 242
+  char buf[32];
+
+  // 1. Brightness (left half)
+  sprintf(buf, "%d%%", brightnessPct[brightnessLevel]);
+  drawSettingRow(CARD_X_START, y, halfW,
+                 "BRIGHTNESS",
+                 buf,
+                 COLOR_WHITE,
+                 "tap to cycle");
+
+  // 2. Refresh (right half)
+  drawSettingRow(rightX, y, halfW,
+                 "REFRESH",
+                 "-> tap",
+                 BRAND_GEMINI,
+                 "re-fetch now");
+
+  y += CARD_H + CARD_GAP;
+
+  // 3. WiFi info (full width)
+  if (WiFi.status() == WL_CONNECTED) {
+    String ssid = WiFi.SSID();
+    if ((int)ssid.length() > 26) ssid = ssid.substring(0, 26);
+    sprintf(buf, "%s  %ddBm", ssid.c_str(), (int)WiFi.RSSI());
+    drawSettingRow(CARD_X_START, y, fullW,
+                   "WIFI",
+                   buf,
+                   COLOR_NET_OK,
+                   WiFi.localIP().toString().c_str());
   } else {
-    tft.setTextColor(BRAND_CLAUDE);
-    tft.print("MANUAL MODE  ");
-    tft.setTextColor(COLOR_TXT_MUTED);
-    tft.print("(press to swap)");
+    drawSettingRow(CARD_X_START, y, fullW,
+                   "WIFI",
+                   "Disconnected",
+                   COLOR_NET_FAIL,
+                   "tap to retry");
   }
-  delay(1000);
+
+  drawFooter();
+  gfx->flush();
 }
 
 // =====================================================================
-// 📡 ฟังก์ชันสำหรับตรวจสอบและกู้คืน WiFi อัตโนมัติ (Auto-Reconnect)
+// 🔃 Loading Screen
+// =====================================================================
+void drawLoadingScreen() {
+  gfx->fillScreen(COLOR_DARK_BG);
+  drawHeader();
+  drawAppLogo(SCREEN_WIDTH / 2, 150, 48, BRAND_GEMINI, COLOR_WHITE);
+
+  gfx->setTextSize(3);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(160, 220);
+  gfx->print("Loading...");
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(150, 260);
+  gfx->print("Fetching token data...");
+
+  gfx->flush();
+}
+
+// =====================================================================
+// 📶 WiFi Retry State (non-blocking retry with STOP / RETRY buttons)
+// =====================================================================
+#define WIFI_RETRY_INTERVAL_MS  5000    // ms between auto-retry attempts
+#define WIFI_RETRY_MAX          9999    // unbounded; user can STOP
+
+bool   wifiAutoRetry   = true;         // auto-retry on by default
+int    wifiRetryCount  = 0;
+unsigned long lastWifiRetryTick = 0;
+
+void wifiStartConnect() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.disconnect(true);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  delay(100);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  wifiRetryCount++;
+  Serial.printf("[WIFI] Auto-retry attempt #%d (auto=%s)\n",
+                wifiRetryCount, wifiAutoRetry ? "yes" : "no");
+}
+
+// Returns true the moment WiFi connects (after a non-blocking wait of ~3s)
+bool wifiTickConnect() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+  // Wait up to 3s for the connection to establish, checking every 250ms
+  for (int i = 0; i < 12; i++) {
+    if (WiFi.status() == WL_CONNECTED) return true;
+    delay(250);
+  }
+  return false;
+}
+
+void drawWifiRetryScreen() {
+  gfx->fillScreen(COLOR_DARK_BG);
+  drawHeader();
+
+  // Big status
+  gfx->setTextSize(3);
+  gfx->setTextColor(COLOR_NET_FAIL);
+  gfx->setCursor(110, 70);
+  gfx->print("WiFi Failed");
+
+  // SSID info
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(20, 110);
+  gfx->print("SSID: ");
+  gfx->print(WIFI_SSID);
+
+  // Retry counter (big, centered)
+  gfx->setTextSize(2);
+  gfx->setTextColor(COLOR_WHITE);
+  char buf[32];
+  sprintf(buf, "Retry attempt: #%d", wifiRetryCount);
+  gfx->setCursor(20, 140);
+  gfx->print(buf);
+
+  // Auto-retry status
+  gfx->setTextSize(1);
+  gfx->setTextColor(wifiAutoRetry ? BRAND_GEMINI : COLOR_TXT_MUTED);
+  gfx->setCursor(20, 170);
+  sprintf(buf, "Auto-retry: %s (every %lus)",
+          wifiAutoRetry ? "ON" : "OFF",
+          WIFI_RETRY_INTERVAL_MS / 1000);
+  gfx->print(buf);
+
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(20, 186);
+  gfx->print("Status: ");
+  gfx->print(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected");
+
+  // Two buttons: STOP (left) and RETRY (right)
+  int btnY = 230;
+  int btnH = 50;
+  int halfW = (SCREEN_WIDTH - CARD_X_START * 2 - CARD_GAP) / 2;  // 228
+  int leftX  = CARD_X_START;
+  int rightX = CARD_X_START + halfW + CARD_GAP;
+
+  // STOP button (red, label changes based on state)
+  gfx->fillRoundRect(leftX, btnY, halfW, btnH, 10,
+                     wifiAutoRetry ? 0xC800 : 0x3186);  // red if active, dim if off
+  gfx->drawRoundRect(leftX, btnY, halfW, btnH, 10, COLOR_BORDER);
+  gfx->setTextSize(3);
+  gfx->setTextColor(COLOR_WHITE);
+  gfx->setCursor(leftX + 50, btnY + 12);
+  gfx->print(wifiAutoRetry ? "STOP" : "RESUME");
+
+  // RETRY button (green, always active)
+  gfx->fillRoundRect(rightX, btnY, halfW, btnH, 10, 0x0400);  // dark green
+  gfx->drawRoundRect(rightX, btnY, halfW, btnH, 10, COLOR_BORDER);
+  gfx->setTextColor(COLOR_WHITE);
+  gfx->setCursor(rightX + 30, btnY + 12);
+  gfx->print("RETRY");
+
+  gfx->flush();
+}
+
+// Tap handling on the WiFi retry screen (separate from main tap handler)
+void handleWifiRetryTap(int x, int y) {
+  int btnY = 230;
+  int btnH = 50;
+  int halfW = (SCREEN_WIDTH - CARD_X_START * 2 - CARD_GAP) / 2;
+  int leftX  = CARD_X_START;
+  int rightX = CARD_X_START + halfW + CARD_GAP;
+
+  if (y < btnY || y > btnY + btnH) return;  // tap outside buttons
+
+  if (x < rightX) {
+    // STOP / RESUME button
+    wifiAutoRetry = !wifiAutoRetry;
+    Serial.printf("[WIFI] User toggled auto-retry: %s\n", wifiAutoRetry ? "ON" : "OFF");
+    if (wifiAutoRetry) {
+      lastWifiRetryTick = 0;  // trigger immediate retry
+    }
+    drawWifiRetryScreen();
+  } else {
+    // RETRY button — force a new attempt now and wait briefly
+    bool ok = wifiTryOnce();
+    Serial.printf("[WIFI] Manual retry: %s\n", ok ? "SUCCESS" : "still failing");
+    if (ok) {
+      useFirebase = true;
+      wifiEverConnected = true;
+    }
+    drawWifiRetryScreen();
+  }
+}
+
+// =====================================================================
+// 📡 WiFi Auto-Reconnect
 // =====================================================================
 void handleWiFiAutoReconnect() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WIFI] สัญญาณขาดหาย! กำลังพยายามกู้คืนและเชื่อมต่อใหม่...");
     WiFi.disconnect();
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    
+
     int reconnectAttempts = 0;
     while (WiFi.status() != WL_CONNECTED && reconnectAttempts < 8) {
       delay(500);
       Serial.print(".");
       reconnectAttempts++;
     }
-    
+
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("\n[WIFI] Reconnected!");
     }
@@ -510,156 +876,165 @@ void handleWiFiAutoReconnect() {
 }
 
 // =====================================================================
-// 🚀 ฟังก์ชันเริ่มต้นระบบฮาร์ดแวร์และลงทะเบียนโปรแกรม (Setup)
+// 🖼️ Render the current screen (state-based router)
+// =====================================================================
+void renderCurrent() {
+  // WiFi not yet connected AND we've never connected: show retry screen
+  if (WiFi.status() != WL_CONNECTED && !wifiEverConnected) {
+    drawWifiRetryScreen();
+    return;
+  }
+  if (!dataFetched) {
+    drawLoadingScreen();
+    return;
+  }
+  if (displayState == STATE_OVERVIEW) {
+    drawOverviewScreen();
+  } else {
+    drawSettingsScreen();
+  }
+}
+
+// Backwards-compat alias (older call-sites may still exist)
+void displayQuota(int index) {
+  (void)index;
+  renderCurrent();
+}
+
+// =====================================================================
+// 🚀 Setup
 // =====================================================================
 void setup() {
   Serial.begin(115200);
-  delay(1000); // 1. ยืดเวลาหน่วง 1 วินาทีเต็ม เพื่อรอให้แรงดันไฟเลี้ยง (Power Rails) บอร์ดนิ่งสมบูรณ์แบบก่อนทำงาน
-  Serial.println("\n=== [BOOT] ESP32 Power Rails Stabilized ===");
-  
-  // 2. ควบคุมขา Backlight ให้อยู่สถานะ LOW ทันทีก่อนบูตส่วนอื่น เพื่อลด Inrush Current ป้องกัน Watchdog Loop
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, LOW); 
-  Serial.println("[BOOT] Backlight set to LOW (Surge Protection Active)");
-  
-  // 3. ทำการ Hardware Reset หน้าจอก่อนเพื่อล้างสถานะชิปค้างของ ST7789
-  Serial.println("[BOOT] Resetting ST7789 Hardware...");
-  pinMode(TFT_RST, OUTPUT);
-  digitalWrite(TFT_RST, HIGH);
-  delay(50);
-  digitalWrite(TFT_RST, LOW);
-  delay(120); // ดึงค่า LOW อย่างน้อย 120ms ตามคู่มือ Datasheet ของ ST7789
-  digitalWrite(TFT_RST, HIGH);
-  delay(120); // รอสัญญาณสลัดสปีดกลับขึ้นมาทำงาน
-  
-  // 4. เริ่มต้นระบบ SPI ระดับฮาร์ดแวร์โดยกำหนดขา VSPI ของ ESP32 แบบชัดเจน
-  // พารามิเตอร์: SCLK=18, MISO=19 (ไม่ได้ใช้แต่ต้องระบุเพื่อให้ไลบรารีเสถียร), MOSI=23, SS/CS=14
-  Serial.println("[BOOT] Configuring SPI Bus...");
-  SPI.begin(18, 19, 23, 14); 
+  delay(1000);
+  Serial.println("\n=== [BOOT] ESP32-S3 Power Rails Stabilized ===");
 
-  // 5. เริ่มต้นสตาร์ทจอสี ST7789 โดยใช้โหมด SPI_MODE0 ดั้งเดิม (เสถียรที่สุดสำหรับคอนโทรลเลอร์รุ่น 1.69 นิ้ว)
-  Serial.println("[BOOT] Initializing Adafruit ST7789...");
-  tft.init(SCREEN_WIDTH, SCREEN_HEIGHT); 
-  tft.setRotation(0); // ล็อกทิศทางแนวตั้งขอบตรง
-  tft.fillScreen(COLOR_DARK_BG);
-  
-  // 6. เมื่อบอร์ดและจอภาพเริ่มระบบเรียบร้อย ค่อยสั่นกระแสไฟสว่าง (Backlight) ขึ้นมาทำงาน ลดไฟกระชากที่จุดสตาร์ท
-  digitalWrite(TFT_BL, HIGH);
+  if (psramFound()) {
+    Serial.printf("[BOOT] PSRAM found: %d bytes\n", ESP.getPsramSize());
+  } else {
+    Serial.println("[BOOT] WARN: PSRAM not enabled. Enable 'OPI PSRAM' in Arduino Tools menu!");
+  }
+
+  // 1. Backlight LOW first (inrush protection)
+  pinMode(GFX_BL, OUTPUT);
+  digitalWrite(GFX_BL, LOW);
+  Serial.println("[BOOT] Backlight set to LOW (Surge Protection Active)");
+
+  // 2. Initialize Arduino_GFX (Canvas + AXS15231B QSPI)
+  Serial.println("[BOOT] Initializing Arduino_GFX...");
+  if (!gfx->begin()) {
+    Serial.println("[BOOT] ERROR: gfx->begin() failed");
+  }
+  gfx->setRotation(1); // landscape 480x320
+  gfx->fillScreen(COLOR_DARK_BG);
+
+  // 3. LEDC PWM on backlight pin + apply default brightness
+  ledcChannel = ledcAttach(GFX_BL, LEDC_FREQ, LEDC_RES);
+  applyBrightnessLevel();
+
+  // 4. Backlight ON
+  digitalWrite(GFX_BL, HIGH);
   Serial.println("[BOOT] Backlight set to HIGH. Screen is Awake.");
-  
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  Serial.println("[BOOT] Switched inputs configured.");
-  
+
+  // 5. Initialize touch
+  axs_touch_init();
+
   // Init aiData with brand info only; quota data zeroed until first Firebase fetch
   aiData[0] = {"Antigravity", BRAND_GEMINI, {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
   aiData[1] = {"Claude",     BRAND_CLAUDE,  {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
   aiData[2] = {"MiniMax",    BRAND_MINIMAX, {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
   aiData[3] = {"GLM",        BRAND_GLM,     {0LL, 100LL, 0LL, 0LL}, {0LL, 100LL, 0LL, 0LL}};
 
-  // Show loading screen while connecting to WiFi & fetching data
+  // Show loading screen
+  refreshClock();
   drawLoadingScreen();
 
-  useFirebase = initFirebase();
-  if (useFirebase) {
-    fetchTokensFromFirebase();  // immediate first fetch on boot
-  }
+  // Kick off first WiFi attempt (non-blocking). Loop will retry.
+  initFirebase();
+  useFirebase = false;  // not yet proven connected
+  lastWifiRetryTick = millis();
 
-  // บันทึกเวลาเมื่อบูตเสร็จสิ้น เพื่อไม่ให้ลูปดึงข้อมูลทำงานจนกว่าจะครบ 30 วินาทีถัดไป
   lastRefresh = millis();
+  lastClockRefresh = millis();
   Serial.println("[BOOT] Setup successfully completed.");
 }
 
-// ฟังก์ชันเชื่อมต่อ WiFi และตั้งเวลา NTP Server
-// ใช้ HTTPClient REST API แทน Firebase streaming client เพื่อประหยัดแฟลช
-bool initFirebase() {
-  Serial.println("[WIFI] Connecting to WiFi...");
-  
-  // 1. เคลียร์ค่าแคชการเชื่อมต่อ Wi-Fi ที่ค้างคาในชิป
-  WiFi.disconnect(true);
-  delay(200);
-  WiFi.mode(WIFI_STA);
-  delay(200);
-  
-  Serial.print("[WIFI] Connecting to SSID: ");
-  Serial.println(WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
-    delay(500);
-    tft.fillScreen(COLOR_DARK_BG);
-    tft.setTextColor(COLOR_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(20, 110);
-    tft.print("Connecting WiFi");
-    for(int p = 0; p < (attempts % 4); p++) tft.print(".");
-    Serial.printf("[WIFI] Attempt %d/40... Status: %d\n", attempts + 1, WiFi.status());
-    attempts++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("[WIFI] Connected. Syncing NTP...");
-    configTime(25200, 0, "pool.ntp.org", "time.nist.gov"); // GMT+7
-    time_t now = time(nullptr);
-    int ntpWait = 0;
-    while (now < 1000000000L && ntpWait < 20) {
-      delay(500);
-      now = time(nullptr);
-      ntpWait++;
-    }
-    
-    tft.fillScreen(COLOR_DARK_BG);
-    tft.setCursor(20, 90);
-    tft.println("WiFi Connected!");
-    tft.setCursor(20, 130);
-    tft.println(WiFi.localIP().toString());
-    delay(2000);
-    
-    // เผยแพร่สถานะเชื่อมต่อ + อ่านค่า selected_index ผ่าน REST API
-    WiFiClientSecure client;
-    client.setInsecure();
-    
-    // PUT /esp32/connected.json = true
-    {
-      HTTPClient http;
-      String url = String("https://") + FIREBASE_HOST + "/esp32/connected.json?auth=" + FIREBASE_AUTH;
-      http.begin(client, url);
-      http.addHeader("Content-Type", "application/json");
-      http.PUT("true");
-      http.end();
-    }
-    
-    // GET /esp32/selected_index.json  → คืนค่า 0..3 หรือ null
-    {
-      HTTPClient http;
-      String url = String("https://") + FIREBASE_HOST + "/esp32/selected_index.json?auth=" + FIREBASE_AUTH;
-      http.begin(client, url);
-      int code = http.GET();
-      if (code == 200) {
-        String body = http.getString();
-        body.trim();
-        if (body.length() > 0 && body != "null") {
-          int idx = body.toInt();
-          if (idx >= 0 && idx < num_ai) currentIndex = idx;
-        }
-      }
-      http.end();
-    }
-    
-    return true;
-  } else {
-    Serial.printf("[WIFI] Failed. Status: %d\n", WiFi.status());
-    tft.fillScreen(COLOR_DARK_BG);
-    tft.setCursor(20, 110);
-    tft.println("WiFi Failed!");
-    tft.setCursor(20, 150);
-    tft.println("Using Demo Mode");
-    delay(2000);
-    return false;
-  }
+// =====================================================================
+// 📶 WiFi + NTP (non-blocking, with retry screen)
+// =====================================================================
+
+// Kick off the first connection attempt at boot. Returns immediately.
+void initFirebase() {
+  Serial.println("[WIFI] Initial connect attempt...");
+  wifiStartConnect();
 }
 
-// บันทึกค่า selected_index ผ่าน REST API (เรียกตอนกดปุ่มสลับแบรนด์)
+// Called from loop() while waiting for connection. Drives the auto-retry
+// loop. Returns true once WiFi is up + NTP is synced.
+bool wifiProcessConnect() {
+  // Auto-retry tick
+  if (wifiAutoRetry && WiFi.status() != WL_CONNECTED) {
+    unsigned long now = millis();
+    if (now - lastWifiRetryTick >= WIFI_RETRY_INTERVAL_MS) {
+      lastWifiRetryTick = now;
+      wifiStartConnect();
+      return false;  // signal we just kicked off an attempt; let tickConnect run
+    }
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  // Connected — sync NTP (blocking, ~1s typical)
+  Serial.println("[WIFI] Connected. Syncing NTP...");
+  configTime(25200, 0, "pool.ntp.org", "time.nist.gov"); // GMT+7
+  time_t nowt = time(nullptr);
+  int ntpWait = 0;
+  while (nowt < 1000000000L && ntpWait < 20) {
+    delay(500);
+    nowt = time(nullptr);
+    ntpWait++;
+  }
+  refreshClock();
+  wifiEverConnected = true;
+
+  // Publish connected flag + read selected_index
+  WiFiClientSecure client;
+  client.setInsecure();
+  {
+    HTTPClient http;
+    String url = String("https://") + FIREBASE_HOST + "/esp32/connected.json?auth=" + FIREBASE_AUTH;
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    http.PUT("true");
+    http.end();
+  }
+  {
+    HTTPClient http;
+    String url = String("https://") + FIREBASE_HOST + "/esp32/selected_index.json?auth=" + FIREBASE_AUTH;
+    http.begin(client, url);
+    int code = http.GET();
+    if (code == 200) {
+      String body = http.getString();
+      body.trim();
+      if (body.length() > 0 && body != "null") {
+        int idx = body.toInt();
+        if (idx >= 0 && idx < num_ai) currentIndex = idx;
+      }
+    }
+    http.end();
+  }
+  return true;
+}
+
+// One-shot connection driver used by the RETRY button — tries once, returns
+// true on success, false on failure.
+bool wifiTryOnce() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+  wifiStartConnect();
+  return wifiTickConnect();
+}
+
 void publishSelectedIndex(int idx) {
   if (WiFi.status() != WL_CONNECTED) return;
   WiFiClientSecure client;
@@ -673,60 +1048,132 @@ void publishSelectedIndex(int idx) {
 }
 
 // =====================================================================
-// 🔄 ลูปวนควบคุมแอปพลิเคชัน (Main Loop)
+// 🖐️ Touch State
+//   tap header (top 36px)  = toggle overview <-> settings
+//   tap a row in settings  = interact with that setting
 // =====================================================================
-void loop() {
-  bool buttonState = digitalRead(BUTTON_PIN);
+void handleTap(int x, int y) {
   unsigned long now = millis();
+  if (now - lastTapTime < TAP_DEBOUNCE_MS) return;
+  lastTapTime = now;
 
-  // ─── Button State Machine ────────────────────────────────────────────
-  // Detect press start (HIGH → LOW)
-  if (buttonState == LOW && lastButtonState == HIGH) {
-    if (now - lastDebounce > DEBOUNCE_MS) {
-      buttonPressStart = now;
-      buttonLongFired = false;
-    }
-    lastDebounce = now;
+  if (y < HEADER_TAP_H) {
+    // Header tap: swap screen
+    displayState = (displayState == STATE_OVERVIEW) ? STATE_SETTINGS : STATE_OVERVIEW;
+    renderCurrent();
+    return;
+  }
+  if (y > SCREEN_HEIGHT - FOOTER_H) {
+    return; // footer is hint-only
   }
 
-  // Detect long press while held (≥ 3000ms, fires once) → toggle Manual/Auto mode
-  if (buttonState == LOW && !buttonLongFired) {
-    if (now - buttonPressStart >= 3000) {
-      buttonLongFired = true;
-      displayMode = (displayMode == MODE_MANUAL) ? MODE_AUTO : MODE_MANUAL;
-      lastAutoSwap = now;
-      drawModeToast();
-      if (dataFetched) displayQuota(currentIndex);
-      else drawLoadingScreen();
-    }
-  }
+  if (displayState == STATE_SETTINGS) {
+    int row = (y - CARD_Y_START) / (CARD_H + CARD_GAP);
 
-  // Detect release (LOW → HIGH) — short press → advance page
-  if (buttonState == HIGH && lastButtonState == LOW) {
-    if (now - lastDebounce > DEBOUNCE_MS) {
-      if (!buttonLongFired && dataFetched) {
-        currentIndex = (currentIndex + 1) % num_ai;
-        if (useFirebase) publishSelectedIndex(currentIndex);
-        displayQuota(currentIndex);
-        if (displayMode == MODE_AUTO) lastAutoSwap = now; // reset auto timer
+      if (row == 0) {
+        // Row 0: two half-cards (Brightness left, Refresh right)
+        if (x < CARD_X_START + CARD_W + CARD_GAP / 2) {
+          // Brightness (left half)
+          brightnessLevel = (brightnessLevel + 1) % 4;
+          applyBrightnessLevel();
+          renderCurrent();
+        } else {
+          // Refresh (right half)
+          if (useFirebase && WiFi.status() == WL_CONNECTED) {
+            fetchTokensFromFirebase();
+            lastRefresh = millis();
+          } else if (WiFi.status() != WL_CONNECTED) {
+            if (wifiTryOnce()) {
+              useFirebase = true;
+              wifiEverConnected = true;
+              fetchTokensFromFirebase();
+            }
+            lastRefresh = millis();
+            renderCurrent();
+          }
+        }
+      } else if (row == 1) {
+      // Row 1: WiFi full width — tap to retry
+      if (WiFi.status() != WL_CONNECTED) {
+        if (wifiTryOnce()) {
+          useFirebase = true;
+          wifiEverConnected = true;
+          fetchTokensFromFirebase();
+        }
+        lastRefresh = millis();
+        renderCurrent();
       }
     }
-    lastDebounce = now;
+  }
+  // In overview, card taps are no-op
+}
+
+void handleTouch() {
+  uint16_t tx, ty;
+  bool touching = axs_touch_read(&tx, &ty);
+
+  if (touching) {
+    if (!touchActive) {
+      touchActive = true;
+      touchStartX = tx;
+      touchStartY = ty;
+    }
+  } else if (touchActive) {
+    touchActive = false;
+
+    // WiFi retry screen: route taps to its button handler
+    if (WiFi.status() != WL_CONNECTED && !wifiEverConnected) {
+      handleWifiRetryTap(touchStartX, touchStartY);
+      return;
+    }
+    if (dataFetched) {
+      handleTap(touchStartX, touchStartY);
+    }
+  }
+}
+
+// =====================================================================
+// 🔄 Main Loop
+// =====================================================================
+void loop() {
+  unsigned long now = millis();
+
+  // ─── Touch input ──────────────────────────────────────────────────
+  handleTouch();
+
+  // ─── WiFi connection driver (non-blocking, drives auto-retry) ──────
+  if (WiFi.status() != WL_CONNECTED || !wifiEverConnected) {
+    if (wifiProcessConnect()) {
+      // Just connected: fetch data and switch to main UI
+      useFirebase = true;
+      if (WiFi.status() == WL_CONNECTED) {
+        fetchTokensFromFirebase();
+      }
+      renderCurrent();
+      return;
+    }
+    // Not connected yet: periodically re-render the retry screen
+    // (so the retry counter updates and buttons refresh)
+    static unsigned long lastRetryRender = 0;
+    if (now - lastRetryRender >= 1000) {
+      lastRetryRender = now;
+      drawWifiRetryScreen();
+    }
+    return;
   }
 
-  lastButtonState = buttonState;
-
-  // ─── Auto-Advance Pages (MODE_AUTO only) ────────────────────────────
-  if (displayMode == MODE_AUTO && dataFetched) {
-    if (now - lastAutoSwap >= AUTO_INTERVAL) {
-      lastAutoSwap = millis();  // snapshot actual fire time, not stale 'now'
-      currentIndex = (currentIndex + 1) % num_ai;
-      if (useFirebase) publishSelectedIndex(currentIndex);
-      displayQuota(currentIndex);
+  // ─── Clock refresh (cheap text compare, re-render only on change) ─
+  if (now - lastClockRefresh >= CLOCK_REFRESH_MS) {
+    lastClockRefresh = now;
+    String prevClock = clockText;
+    String prevDate  = dateText;
+    refreshClock();
+    if (dataFetched && (clockText != prevClock || dateText != prevDate)) {
+      renderCurrent();
     }
   }
 
-  // ─── Cloud Refresh (every 30s) ───────────────────────────────────────
+  // ─── Cloud Refresh (every 30s) ─────────────────────────────────────
   if (now - lastRefresh >= 30000) {
     lastRefresh = now;
     if (useFirebase) {
@@ -735,48 +1182,29 @@ void loop() {
       } else {
         Serial.println("[LOOP] WiFi dropped, marking offline");
         useFirebase = false;
-        if (dataFetched) displayQuota(currentIndex);
-        else drawLoadingScreen();
-      }
-    } else {
-      // Not connected: retry WiFi/Firebase every 30s
-      Serial.println("[LOOP] Attempting WiFi/Firebase reconnect...");
-      useFirebase = initFirebase();
-      if (useFirebase) {
-        fetchTokensFromFirebase();
-      } else if (!dataFetched) {
-        drawLoadingScreen();
+        wifiEverConnected = false;  // re-show the retry screen
+        renderCurrent();
       }
     }
   }
 }
 
-void displayQuota(int index) {
-  if (index < 0 || index >= num_ai) return; 
-  drawStackedDualUI(index);
-}
-
-// ซิงก์ดึงข้อมูล Flat Quota ล่าสุดจาก /display/quotas
-// (ตรงกับ payload ที่ lib/firebase.js เผยแพร่: PUT ไปยัง /display.json
-//  ซึ่งใน REST API ".json" ท้าย URL เป็น directive ของ Firebase — path จริงคือ /display
-//  โครงสร้างข้อมูล: { lastUpdated, quotas: { gemini: {...}, claude: {...}, ... } })
-//
-// ใช้ HTTPClient REST โดยตรงเพราะ FirebaseESP32 library ไม่อนุญาตให้ path มี "."
-// URL pattern: https://<host>/<path>.json?auth=<token>
+// =====================================================================
+// 🔥 ซิงก์ดึงข้อมูล Flat Quota ล่าสุดจาก /display/quotas
+// =====================================================================
 void fetchTokensFromFirebase() {
   if (!useFirebase) return;
-  
+
   Serial.println("[FIREBASE] GET /display/quotas via REST...");
-  
+
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  
-  // path จริง: /display/quotas  (web app เขียน PUT /display.json → ข้อมูลอยู่ที่ /display)
+
   String url = String("https://") + FIREBASE_HOST + "/display/quotas.json?auth=" + FIREBASE_AUTH;
   http.begin(client, url);
   http.setTimeout(8000);
-  
+
   int httpCode = http.GET();
   if (httpCode == 404) {
     Serial.println("[FIREBASE] 404 — web app hasn't published yet");
@@ -784,40 +1212,35 @@ void fetchTokensFromFirebase() {
     return;
   }
   if (httpCode != 200) {
-    // log body เพื่อ debug ปัญหา 4xx/5xx
     String errBody = http.getString();
     Serial.printf("[FIREBASE] HTTP %d: %s | body: %s\n", httpCode,
                   http.errorToString(httpCode).c_str(), errBody.c_str());
     http.end();
     return;
   }
-  
+
   String body = http.getString();
   http.end();
   Serial.printf("[FIREBASE] Got %d bytes\n", body.length());
-  
-  // Parse JSON ด้วย FirebaseJson (parse body string)
+
   FirebaseJson json;
   if (!json.setJsonData(body)) {
     Serial.println("[FIREBASE] Failed to parse JSON");
     return;
   }
-  
+
   FirebaseJsonData jsonData;
-  
+
   for (int i = 0; i < num_ai; i++) {
     String prefix = aiKeys[i] + "/";
-    
-    // 1. ชื่อแบรนด์ (web app เผยแพร่ NAMES[brand] = "Antigravity", "Claude", ...)
+
     if (json.get(jsonData, (prefix + "name").c_str())) {
       aiData[i].name = jsonData.stringValue;
     }
-    
-    // 2. อ่าน flat fields ที่ web app เผยแพร่
+
     long long remaining       = getJsonInt64(json, prefix + "remaining");
     long long limitValue      = getJsonInt64(json, prefix + "limit_value");
     long long weeklyRemaining = getJsonInt64(json, prefix + "weekly_remaining");
-    // DEBUG: log raw JSON type + value for reset_at fields
     {
       FirebaseJsonData dbg;
       if (json.get(dbg, (prefix + "reset_at").c_str())) {
@@ -837,21 +1260,15 @@ void fetchTokensFromFirebase() {
     long long resetAt       = getJsonInt64(json, prefix + "reset_at");
     long long resetAtWeekly = getJsonInt64(json, prefix + "reset_at_weekly");
 
-    // Validate reset_at: always reject negative values (int32 overflow garbage).
-    // Only apply the "too far in future" guard when NTP is synced — if time() hasn't
-    // synced yet it returns seconds-since-boot (~45s), and using that as 'now' would
-    // make every valid 2025 timestamp look >90 days in the future and reject it.
     {
       if (resetAt       < 0) resetAt       = 0;
       if (resetAtWeekly < 0) resetAtWeekly = 0;
-      // Auto-convert ms→s: server may publish either unit. Values > 10^11
-      // (year 5138 in seconds) are definitely milliseconds.
       if (resetAt       > 100000000000LL) resetAt       /= 1000;
       if (resetAtWeekly > 100000000000LL) resetAtWeekly /= 1000;
       time_t ntp = time(nullptr);
       if (ntp > 1000000000L) {
         long long now_ll    = (long long)ntp;
-        long long maxFuture = now_ll + 90LL * 86400;  // 90 days from now
+        long long maxFuture = now_ll + 90LL * 86400;
         if (resetAt       > maxFuture) resetAt       = 0;
         if (resetAtWeekly > maxFuture) resetAtWeekly = 0;
       }
@@ -862,14 +1279,12 @@ void fetchTokensFromFirebase() {
     long long spendPctWk      = getJsonInt64(json, prefix + "spend_pct_weekly");
     long long tokens5h        = getJsonInt64(json, prefix + "tokens5h");
     long long tokensWk        = getJsonInt64(json, prefix + "tokens_wk");
-    
-    // 3. อ่าน unit (string) — "percent" / "requests" / "not_exposed" / "per_minute"
+
     String unit = "not_exposed";
     if (json.get(jsonData, (prefix + "unit").c_str())) {
       unit = jsonData.stringValue;
     }
-    
-    // 4. คำนวณ 5h quota ตาม unit (ตรงกับ web dashboard logic ใน computeApiUsedPct)
+
     if (unit == "percent" && remaining >= 0 && remaining <= 100) {
       aiData[i].quota5h.total = 100;
       aiData[i].quota5h.remaining = remaining;
@@ -880,7 +1295,6 @@ void fetchTokensFromFirebase() {
       aiData[i].quota5h.used = limitValue - remaining;
       if (aiData[i].quota5h.used < 0) aiData[i].quota5h.used = 0;
     } else {
-      // not_exposed หรือ per_minute: fallback เป็น RTK spend percentage
       aiData[i].quota5h.total = 100;
       aiData[i].quota5h.remaining = 100 - spendPct5h;
       if (aiData[i].quota5h.remaining < 0) aiData[i].quota5h.remaining = 0;
@@ -888,8 +1302,7 @@ void fetchTokensFromFirebase() {
       aiData[i].quota5h.used = spendPct5h;
     }
     aiData[i].quota5h.reset_at = resetAt;
-    
-    // 5. คำนวณ weekly quota (web เผยแพร่ weekly_remaining เป็น percent)
+
     if (weeklyRemaining > 0 && weeklyRemaining <= 100) {
       aiData[i].quotaWeekly.total = 100;
       aiData[i].quotaWeekly.remaining = weeklyRemaining;
@@ -903,7 +1316,6 @@ void fetchTokensFromFirebase() {
     }
     aiData[i].quotaWeekly.reset_at = resetAtWeekly;
 
-    // DEBUG: show exactly what the card will display for this brand
     int pct5h = calcRemainingPct(aiData[i].quota5h);
     int pctWk = calcRemainingPct(aiData[i].quotaWeekly);
     Serial.printf("[CALC] %-10s unit=%-12s | 5h:  rem=%lld tot=%lld pct=%d%% | wk: rem=%lld tot=%lld pct=%d%%\n",
@@ -911,13 +1323,12 @@ void fetchTokensFromFirebase() {
                   aiData[i].quota5h.remaining,   aiData[i].quota5h.total,   pct5h,
                   aiData[i].quotaWeekly.remaining, aiData[i].quotaWeekly.total, pctWk);
   }
-  
+
   Serial.print("[DEBUG] Sync OK! Antigravity 5H: ");
   Serial.print((long)aiData[0].quota5h.remaining);
   Serial.print("% | Weekly: ");
   Serial.println((long)aiData[0].quotaWeekly.remaining);
 
-  dataFetched = true;         // unlock display after first successful fetch
-  displayQuota(currentIndex);
-  if (displayMode == MODE_AUTO) lastAutoSwap = millis(); // don't let cloud refresh trigger instant extra swap
+  dataFetched = true;
+  renderCurrent();
 }
