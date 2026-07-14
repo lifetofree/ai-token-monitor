@@ -8,12 +8,13 @@ const { exec, execFile } = require('child_process');
 const { parseAllTranscripts } = require('./lib/antigravity-parser');
 const { BRAND_FETCHERS } = require('./lib/brand-fetchers');
 const { getRtkSpendMetrics } = require('./lib/rtk-metrics');
+const { detectBrand } = require('./lib/brand-detect');
 const { publishToFirebase } = require('./lib/firebase');
 const { loadEnv, maskSecret, handleGetEnv, handlePostEnvKey, handlePostEnv } = require('./lib/env');
 const { DB_PATH, escapeSQLString, escapeSQLNumber, escapeSQLFloat, ensureBrandQuotaTable, readBrandQuotaRows, writeBrandQuotaRow, isCacheValid } = require('./lib/quota-cache');
 const { addSseClient, removeSseClient, broadcastToClients, initWatcher } = require('./lib/sse-watcher');
 
-const PORT = 3000;
+const PORT = 3838;
 const STATIC_ROOT = path.resolve(__dirname);
 
 const MIME_TYPES = {
@@ -429,14 +430,45 @@ const server = http.createServer((req, res) => {
   });
 });
 
+async function invalidateBrandCache(brand) {
+  return new Promise((resolve) => {
+    const query = `UPDATE brand_quota SET seeded_at = 0 WHERE brand = ${escapeSQLString(brand)}`;
+    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
+      if (error) {
+        console.error(`[cache] Failed to invalidate cache for ${brand}:`, error);
+      } else {
+        console.log(`[cache] Invalidated cache for brand: ${brand}`);
+      }
+      resolve();
+    });
+  });
+}
+
+const brandsToInvalidate = new Set();
 let firebaseUpdateTimeout = null;
-function triggerFirebaseUpdate() {
+function triggerFirebaseUpdate(cmds) {
+  if (Array.isArray(cmds)) {
+    cmds.forEach(cmd => {
+      const brand = cmd.brand || detectBrand(cmd.original_cmd);
+      if (brand) {
+        brandsToInvalidate.add(brand);
+      }
+    });
+  }
+
   if (firebaseUpdateTimeout) clearTimeout(firebaseUpdateTimeout);
   firebaseUpdateTimeout = setTimeout(async () => {
     try {
-      const results = await readBrandQuotaRows();
-      const env = loadEnv(STATIC_ROOT);
-      const rtkSpend = await getRtkSpendMetrics();
+      // Invalidate cache for accumulated brands
+      for (const brand of brandsToInvalidate) {
+        await invalidateBrandCache(brand);
+      }
+      brandsToInvalidate.clear();
+
+      const out = await seedBrandQuotas(false);
+      const results = out.results;
+      const env = out.env || loadEnv(STATIC_ROOT);
+      const rtkSpend = out.rtkSpend || await getRtkSpendMetrics();
       await publishToFirebase(results, env, rtkSpend);
       console.log('[firebase] Pushed real-time update for ESP32');
     } catch (e) {
@@ -447,8 +479,8 @@ function triggerFirebaseUpdate() {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`AI Token Monitor running at http://localhost:${PORT}/`);
-  initWatcher(DB_PATH, () => {
-    triggerFirebaseUpdate();
+  initWatcher(DB_PATH, (cmds) => {
+    triggerFirebaseUpdate(cmds);
   });
   ensureBrandQuotaTable();
   ensureBrandColumn();
@@ -462,10 +494,25 @@ server.listen(PORT, '127.0.0.1', () => {
     console.error('Initial brand-quota seed failed:', err);
   });
 
-  try {
-    const startCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-    exec(`${startCmd} http://localhost:${PORT}`);
-  } catch (e) {}
+  // Periodic quota sync in background (checks TTL every 30 seconds)
+  setInterval(async () => {
+    try {
+      const out = await seedBrandQuotas(false);
+      if (!out.cached) {
+        publishToFirebase(out.results, out.env, out.rtkSpend).catch(e => console.error('[firebase]', e?.message));
+        console.log('[firebase] Periodic quota check fetched fresh data and pushed to ESP32');
+      }
+    } catch (e) {
+      console.error('Periodic brand-quota sync failed:', e);
+    }
+  }, 30 * 1000);
+
+  if (process.env.NO_BROWSER !== 'true') {
+    try {
+      const startCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+      exec(`${startCmd} http://localhost:${PORT}`);
+    } catch (e) {}
+  }
 });
 
 function ensureBrandColumn() {
@@ -548,7 +595,25 @@ async function seedBrandQuotas(force) {
     const prev = existing.find(r => r.brand === brand) || null;
 
     let row;
-    if (!apiKey) {
+    const maxAge = (prev && (prev.reset_at || prev.reset_at_weekly)) ? 3 * 60_000 : 60_000;
+    const isCachedValid = !force && prev && prev.seeded_at && (
+      (prev.reset_at === null || Date.now() < prev.reset_at) &&
+      (prev.reset_at_weekly === null || Date.now() < prev.reset_at_weekly) &&
+      (Date.now() - prev.seeded_at < maxAge)
+    );
+
+    if (isCachedValid) {
+      const brandRtk = rtkSpend[brand] || null;
+      let rawJson = prev.raw_json;
+      if (typeof rawJson === 'string') {
+        try { rawJson = JSON.parse(rawJson); } catch (e) { rawJson = null; }
+      }
+      const updatedRawJson = brandRtk
+        ? Object.assign({}, rawJson, { _rtk_spend: brandRtk })
+        : rawJson;
+
+      row = Object.assign({}, prev, { raw_json: updatedRawJson });
+    } else if (!apiKey) {
       // No API key — but still include RTK spend data so Firebase/ESP32
       // can display token counts and cost from the local database.
       const brandRtk = rtkSpend[brand] || null;

@@ -28,10 +28,10 @@ RUN useradd --create-home --shell /bin/bash --uid 1001 app \
     && chown -R app:app /app
 USER app
 
-EXPOSE 3000
+EXPOSE 3838
 
 # Lightweight healthcheck: GET /api/summary should return 200.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://127.0.0.1:3000/api/summary', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1));"
+    CMD node -e "require('http').get('http://127.0.0.1:3838/api/summary', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1));"
 
 CMD ["node", "server.js"]

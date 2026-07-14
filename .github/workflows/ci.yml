@@ -35,6 +35,6 @@ jobs:
           node server.js &
           SERVER_PID=$!
           sleep 3
-          curl -sf http://localhost:3000/ > /dev/null
-          curl -sf http://localhost:3000/api/seed-quotas > /dev/null
+          curl -sf http://localhost:3838/ > /dev/null
+          curl -sf http://localhost:3838/api/seed-quotas > /dev/null
           kill $SERVER_PID

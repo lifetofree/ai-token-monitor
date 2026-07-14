@@ -28,7 +28,7 @@ A single developer (the project author) using multiple LLM Brands on one machine
 
 - Kill-switch / auto-throttle when a limit is breached (v1 is monitor-only)
 - Multi-user, multi-tenant, authentication
-- Network exposure; the dashboard runs on `localhost:3000` only
+- Network exposure; the dashboard runs on `localhost:3838` only
 - Reconciliation with actual invoice charges (the dashboard never knows what was actually billed)
 - i18n (limit labels are English-only in v1)
 - Mobile / responsive layout beyond a desktop browser
@@ -69,7 +69,7 @@ A local-spend dashboard tells the user what *this dashboard* has seen, but does 
 
 ### The Solution Vision
 
-1. **Live provider API quota**: each Brand has a fetcher that hits the vendor's quota endpoint on a cached refresh cycle. Claude reads `anthropic-ratelimit-*` response headers. MiniMax hits `https://www.minimax.io/v1/token_plan/remains` with Bearer auth. GLM reads `x-ratelimit-*` headers. Gemini does not expose quota (returns `not_exposed`).
+1. **Live provider API quota**: each Brand has a fetcher that hits the vendor's quota endpoint on a cached refresh cycle. Claude is tracked purely via the local RTK database (no Anthropic API call — its rate-limit headers are a per-minute token bucket, not a 5h/weekly window, and are absent when the account has insufficient credit). MiniMax hits `https://www.minimax.io/v1/token_plan/remains` with Bearer auth. GLM reads `x-ratelimit-*` headers. Gemini does not expose quota (returns `not_exposed`).
 2. **`brand_quota` cache table**: a SQLite table stores `remaining`, `limit_value`, `reset_at`, `reset_at_weekly`, `weekly_remaining`, `unit`, `raw_json`, `seeded_at`, `error` per Brand. Cache invalidation triggers on either reset time elapsing or 1-hour staleness.
 3. **API-driven progress bar**: the brand card's 5-hour and weekly bars switch to API-quota-driven fill (with a `color-mix`-style tooltip) whenever a quota is present, and fall back to local-spend fill otherwise.
 4. **Reset-time authority**: the "Resets at HH:MM" badge prefers the provider's authoritative reset timestamp over the local rolling-log estimate.
@@ -80,7 +80,7 @@ Real RTK mode was originally present, removed in `0005-remove-real-rtk-mode.md` 
 
 ## Success criteria
 
-The dashboard is successful if its single user can answer these questions without leaving `localhost:3000`:
+The dashboard is successful if its single user can answer these questions without leaving `localhost:3838`:
 
 1. How much have I spent on each Brand today, this 5-hour window, and this week (local view)?
 2. **How close am I to the vendor's 5-hour and weekly caps, and when do they reset?**

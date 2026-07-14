@@ -114,7 +114,7 @@ it('ignores unknown brand values (not in VALID_BRANDS)', () => {
 
 ```bash
 # Gemini call — explicit brand so it lands on the Gemini card
-curl -s -X POST http://localhost:3000/api/rtk/ingest \
+curl -s -X POST http://localhost:3838/api/rtk/ingest \
   -H 'Content-Type: application/json' \
   -d '{
     "original_cmd": "generate_content(user_prompt)",
@@ -125,7 +125,7 @@ curl -s -X POST http://localhost:3000/api/rtk/ingest \
   }'
 
 # Claude call — keyword in original_cmd is enough, brand field optional
-curl -s -X POST http://localhost:3000/api/rtk/ingest \
+curl -s -X POST http://localhost:3838/api/rtk/ingest \
   -H 'Content-Type: application/json' \
   -d '{
     "original_cmd": "claude messages.create",

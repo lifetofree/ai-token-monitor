@@ -4,11 +4,11 @@
 
 ## Persona
 
-A developer using multiple LLM Brands in a single workday, who wants a glanceable answer to "what am I spending, am I near a self-imposed cap, **am I about to hit the vendor's cap, is the cache doing its job**". They also keep a parallel browser tab open to each provider's web console (e.g. the MiniMax Token Plan page) to sanity-check the dashboard. Single user, desktop browser, `localhost:3000`.
+A developer using multiple LLM Brands in a single workday, who wants a glanceable answer to "what am I spending, am I near a self-imposed cap, **am I about to hit the vendor's cap, is the cache doing its job**". They also keep a parallel browser tab open to each provider's web console (e.g. the MiniMax Token Plan page) to sanity-check the dashboard. Single user, desktop browser, `localhost:3838`.
 
 ## Primary journey: "Did I just blow my 5-hour cap?"
 
-1. **Open the dashboard.** The page loads at `http://localhost:3000`. The header shows the current Monitor Mode (default: Real RTK Monitor), the simulation status, and a 30-second refresh countdown.
+1. **Open the dashboard.** The page loads at `http://localhost:3838`. The header shows the current Monitor Mode (default: Real RTK Monitor), the simulation status, and a 30-second refresh countdown.
 2. **Glance at the four Brand cards.** Each card shows two horizontal bars: 5-Hour and Weekly. A red fill at or above 90% is the trigger. When the Brand has a provider-quota snapshot, the bar fill and color match the **vendor's** view, not just local spend.
 3. **Hover the "Resets at HH:MM" badge** to confirm the source. The tooltip is one of two strings:
    - `"Reset time from the provider API (authoritative window boundary)."` — the badge time matches the vendor web console.
@@ -33,7 +33,7 @@ This is the user explicitly checking the **provider-authoritative** view — the
 
 ## Secondary journey: "Is the cache actually saving me money?"
 
-1. **Open the dashboard.** The page loads at `http://localhost:3000`. The header shows the simulation status and a 30-second refresh countdown.
+1. **Open the dashboard.** The page loads at `http://localhost:3838`. The header shows the simulation status and a 30-second refresh countdown.
 2. **Glance at the four Brand cards.** Each card shows two horizontal bars: 5-Hour and Weekly. A red fill at or above 90% is the trigger.
 3. **Hover the "Resets at HH:MM" badge** to confirm the sliding-window semantics ("the oldest request in this window falls out at the shown time").
 4. **Scroll to the table** if a per-Brand breakdown is needed (sortable by Cost, Requests, Saved Tokens, etc.).
@@ -76,9 +76,9 @@ This is the user explicitly checking the **provider-authoritative** view — the
 
 ### "I want my other project's LLM usage to count toward this dashboard."
 
-- In the other project, after each LLM call, `POST` to `http://localhost:3000/api/rtk/ingest` with a JSON body that mirrors the RTK `commands` schema:
+- In the other project, after each LLM call, `POST` to `http://localhost:3838/api/rtk/ingest` with a JSON body that mirrors the RTK `commands` schema:
   ```bash
-  curl -X POST http://localhost:3000/api/rtk/ingest \
+  curl -X POST http://localhost:3838/api/rtk/ingest \
     -H "Content-Type: application/json" \
     -d '{
       "original_cmd": "my-project: claude chat \"summarise docs\"",

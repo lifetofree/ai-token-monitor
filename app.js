@@ -344,9 +344,10 @@ function renderBrandCards(brandData) {
     // When the provider exposes a real quota-reset timestamp via /api/seed-quotas
     // (state.brandQuotas), prefer that — it's the authoritative window boundary.
     const apiQuota = (state.brandQuotas && state.brandQuotas[bKey]) || null;
-    // Skip per_minute reset_at for the 5h row — it's a ~60s window boundary, not 5h.
+    // Provider-authoritative reset times (when the API exposes them). Claude
+    // ('local' unit) has no provider window, so reset_at is always null there
+    // and the RTK rolling-window boundary is used instead.
     const apiReset5hMs = apiQuota && apiQuota.reset_at && apiQuota.reset_at > now
-      && apiQuota.unit !== 'per_minute'
       ? apiQuota.reset_at - now : null;
     const apiResetWeeklyMs = apiQuota && apiQuota.reset_at_weekly && apiQuota.reset_at_weekly > now
       ? apiQuota.reset_at_weekly - now : null;
@@ -360,10 +361,9 @@ function renderBrandCards(brandData) {
       : null;
 
     // Drive the progress bar from the provider's API quota when available.
-    // For 'per_minute' (Claude): the API exposes a per-minute token bucket, not
-    // a 5h window. Skip API-driven bar/reset for the 5h row so RTK rolling data
-    // is always used for Claude's 5h bar and reset countdown.
-    const isPerMinute = apiQuota && apiQuota.unit === 'per_minute';
+    // Claude is RTK-only (unit: 'local') — computeApiUsedPct returns null for
+    // it, so both bars fall back to RTK cost-based spend.
+    const isLocal = apiQuota && apiQuota.unit === 'local';
     const apiUsedPct5h = QuotaUtils.computeApiUsedPct(apiQuota, '5h');
     const apiUsedPctWeekly = QuotaUtils.computeApiUsedPct(apiQuota, 'weekly');
 
@@ -372,8 +372,8 @@ function renderBrandCards(brandData) {
     // percentages and rolling reset times.
     const rtkSpend = (() => {
       if (!apiQuota) return null;
-      // Claude: raw_json IS the RTK spend object (cost5h, requests5h, etc.)
-      if (isPerMinute && apiQuota.raw_json && typeof apiQuota.raw_json.cost5h === 'number') {
+      // Claude (unit: 'local'): raw_json IS the RTK spend object (cost5h, requests5h, etc.)
+      if (isLocal && apiQuota.raw_json && typeof apiQuota.raw_json.cost5h === 'number') {
         const s = apiQuota.raw_json;
         return {
           cost5h: s.cost5h || 0,
@@ -451,16 +451,16 @@ function renderBrandCards(brandData) {
 
     // Amount labels: provider-specific display.
     // - percent unit (MiniMax, GLM): "X% remaining" from API
-    // - per_minute (Claude): RTK-tracked token count + cost for the window
+    // - local unit (Claude): RTK-tracked token count + cost for the window
     // - otherwise: "$X.XX / $Y.YY" cost-based fallback
     const amounts5h = (apiQuota && apiQuota.unit === 'percent' && typeof apiQuota.remaining === 'number')
       ? `${apiQuota.remaining}% remaining`
-      : isPerMinute
+      : isLocal
         ? `${formatCompactNumber(rtkSpend ? rtkSpend.tokens5h : data.tokens5h)} tokens · ${formatCurrency(rtkSpend ? rtkSpend.cost5h : data.cost5h)}`
         : `${formatCurrency(data.cost5h)} / ${formatCurrency(limit5h)}`;
     const amountsWeekly = (apiQuota && typeof apiQuota.weekly_remaining === 'number')
       ? `${apiQuota.weekly_remaining}% remaining`
-      : isPerMinute
+      : isLocal
         ? `${formatCompactNumber(rtkSpend ? rtkSpend.tokensWeekly : data.tokensWeekly)} tokens · ${formatCurrency(rtkSpend ? rtkSpend.costWeekly : data.costWeekly)}`
         : `${formatCurrency(data.costWeekly)} / ${formatCurrency(limitWeekly)}`;
 
@@ -498,7 +498,7 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">5-Hour</span>
             <span class="rolling-limit-amounts">${amounts5h}</span>
-            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${fmtPct(barPct5h)}%</span>
+            <span style="color: ${style5h.color}; font-weight: 600; font-size: 11px;" title="${isLocal ? 'RTK-tracked usage vs configured spend limit' : ''}">${fmtPct(barPct5h)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSource5h))}">
             <div class="brand-limit-fill${style5h.class}" style="width: ${barPct5h}%;"></div>
@@ -512,7 +512,7 @@ function renderBrandCards(brandData) {
           <div class="rolling-limit-row-header">
             <span class="rolling-limit-title">Weekly</span>
             <span class="rolling-limit-amounts">${amountsWeekly}</span>
-            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;" title="${isPerMinute ? 'RTK-tracked usage vs configured spend limit' : ''}">${fmtPct(barPctWeekly)}%</span>
+            <span style="color: ${styleWeekly.color}; font-weight: 600; font-size: 11px;" title="${isLocal ? 'RTK-tracked usage vs configured spend limit' : ''}">${fmtPct(barPctWeekly)}%</span>
           </div>
           <div class="brand-limit-bar" title="${escapeHtml(barSourceTooltip(barSourceWeekly))}">
             <div class="brand-limit-fill${styleWeekly.class}" style="width: ${barPctWeekly}%;"></div>
@@ -1392,8 +1392,14 @@ function connectRTKStream() {
         projectPath: cmd.project_path || ''
       };
 
-      const exists = state.realCommands.some(r => r.id === newReq.id);
-      if (!exists) {
+      const existingIdx = state.realCommands.findIndex(r => r.id === newReq.id);
+      if (existingIdx !== -1) {
+        state.realCommands[existingIdx] = newReq;
+        scheduleDashboardRender();
+        if (cmd.project_path) {
+          fetchProjectData();
+        }
+      } else {
         state.realCommands.push(newReq);
         if (state.realCommands.length > MAX_REQUESTS_RETAINED) {
           state.realCommands.shift();
