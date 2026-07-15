@@ -497,44 +497,12 @@ function renderBrandCards(brandData) {
     const errorIndicator = isError
       ? `<span class="quota-error-indicator" style="color: var(--danger); cursor: help; margin-left: 6px; font-size: 14px;" title="${escapeHtml(errorTooltip)}">⚠️</span>`
       : '';
-    // Antigravity-specific: show token counts only (no fake % bar)
-    // since the tier is "Unlimited" — there is no dollar/token cap to show progress against.
-    const isAntiqravity = bKey === 'gemini';
-    const tokens5h     = state.agentUsage ? state.agentUsage.window5h.inputTokens + state.agentUsage.window5h.outputTokens : data.tokens5h;
-    const tokensWeekly = state.agentUsage ? state.agentUsage.weekly.inputTokens + state.agentUsage.weekly.outputTokens : data.tokensWeekly;
-    const cost5hDisplay     = state.agentUsage ? state.agentUsage.window5h.totalCost : data.cost5h;
-    const costWeeklyDisplay = state.agentUsage ? state.agentUsage.weekly.totalCost : data.costWeekly;
 
     const card = document.createElement('div');
     card.className = 'card brand-card';
     card.style.setProperty('--brand-color', getBrandColor(bKey));
 
-    card.innerHTML = isAntiqravity ? `
-      <div class="brand-card-header">
-        <span class="brand-name">${escapeHtml(meta.name)}${errorIndicator}</span>
-        <span class="brand-cost-title">${state.agentUsage ? state.agentUsage.total.conversationsCount : data.requests} convs</span>
-      </div>
-
-      <div class="rolling-limits-stack" style="margin-top: 0; border-top: none; padding-top: 0;">
-        <!-- 5-Hour token usage (Antigravity: no % bar, token counts only) -->
-        <div class="rolling-limit-row">
-          <div class="rolling-limit-row-header">
-            <span class="rolling-limit-title">5-Hour</span>
-            <span class="rolling-limit-amounts">${formatCompactNumber(tokens5h)} tokens · ${formatCurrency(cost5hDisplay)}</span>
-          </div>
-          <span class="reset-badge" title="${escapeHtml(reset5hTooltip)}">&#x23F1; ${reset5hLabel}</span>
-        </div>
-
-        <!-- Weekly token usage -->
-        <div class="rolling-limit-row">
-          <div class="rolling-limit-row-header">
-            <span class="rolling-limit-title">Weekly</span>
-            <span class="rolling-limit-amounts">${formatCompactNumber(tokensWeekly)} tokens · ${formatCurrency(costWeeklyDisplay)}</span>
-          </div>
-          <span class="reset-badge" title="${escapeHtml(resetWeeklyTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
-        </div>
-      </div>
-    ` : `
+    card.innerHTML = `
       <div class="brand-card-header">
         <span class="brand-name">${escapeHtml(meta.name)}${errorIndicator}</span>
         <span class="brand-cost-title">${rtkSpend ? rtkSpend.requestsWeekly : data.requests} reqs</span>
