@@ -417,7 +417,7 @@ const server = http.createServer((req, res) => {
     const fiveHoursAgo = now - 5 * 60 * 60 * 1000;
     const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
 
-    const query = `SELECT 'total' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage UNION ALL SELECT '5h' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${fiveHoursAgo} UNION ALL SELECT 'weekly' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${sevenDaysAgo};`;
+    const query = `SELECT 'total' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage UNION ALL SELECT '5h' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${fiveHoursAgo} UNION ALL SELECT 'weekly' as window, COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input, COALESCE(SUM(output_tokens), 0) as output, COALESCE(SUM(cached_tokens), 0) as cached, COALESCE(SUM(total_cost), 0.0) as cost, MIN(last_updated) as earliest FROM agent_usage WHERE last_updated >= ${sevenDaysAgo} UNION ALL SELECT 'freshest' as window, 0 as count, input_tokens as input, output_tokens as output, cached_tokens as cached, total_cost as cost, last_updated as earliest FROM (SELECT * FROM agent_usage ORDER BY last_updated DESC LIMIT 1);`;
 
     execFile('sqlite3', ['-cmd', '.timeout 5000', '-json', DB_PATH, query], (error, stdout) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -427,13 +427,28 @@ const server = http.createServer((req, res) => {
       }
       try {
         const rows = stdout.trim() ? JSON.parse(stdout) : [];
+        let contextWindow = null;
+
         const result = {
           total: { conversationsCount: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalCost: 0, earliestTimestamp: null },
           window5h: { conversationsCount: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalCost: 0, earliestTimestamp: null },
-          weekly: { conversationsCount: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalCost: 0, earliestTimestamp: null }
+          weekly: { conversationsCount: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalCost: 0, earliestTimestamp: null },
+          contextWindow: null
         };
 
         rows.forEach(row => {
+          if (row.window === 'freshest') {
+            const used = (row.input || 0) + (row.output || 0);
+            const size = 200000;
+            const usedPct = Math.min(100, Math.round((used / size) * 100));
+            contextWindow = {
+              used: usedPct,
+              remaining: 100 - usedPct,
+              size: size
+            };
+            return;
+          }
+
           const stats = {
             conversationsCount: row.count || 0,
             inputTokens: row.input || 0,
@@ -447,6 +462,7 @@ const server = http.createServer((req, res) => {
           if (row.window === 'weekly') result.weekly = stats;
         });
 
+        result.contextWindow = contextWindow;
         res.end(JSON.stringify(result));
       } catch (e) {
         res.end(JSON.stringify({ error: 'Parse failed' }));

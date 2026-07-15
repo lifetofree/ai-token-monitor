@@ -498,6 +498,25 @@ function renderBrandCards(brandData) {
       ? `<span class="quota-error-indicator" style="color: var(--danger); cursor: help; margin-left: 6px; font-size: 14px;" title="${escapeHtml(errorTooltip)}">⚠️</span>`
       : '';
 
+    let contextWindowHtml = '';
+    if (bKey === 'gemini' && state.agentUsage && state.agentUsage.contextWindow) {
+      const cw = state.agentUsage.contextWindow;
+      const sizeLabel = formatCompactNumber(cw.size);
+      contextWindowHtml = `
+        <!-- Active Session Context Window (Antigravity Only) -->
+        <div class="rolling-limit-row" style="margin-top: 8px; border-top: 1px dashed var(--border-color); padding-top: 8px;">
+          <div class="rolling-limit-row-header">
+            <span class="rolling-limit-title" style="color: var(--text-muted);">Session Memory</span>
+            <span class="rolling-limit-amounts">${cw.remaining}% remaining of ${sizeLabel}</span>
+            <span style="color: var(--text-muted); font-weight: 600; font-size: 11px;">${cw.used}% used</span>
+          </div>
+          <div class="brand-limit-bar" title="Memory capacity consumed by the active chat conversation history in your terminal.">
+            <div class="brand-limit-fill" style="width: ${cw.used}%;"></div>
+          </div>
+        </div>
+      `;
+    }
+
     const card = document.createElement('div');
     card.className = 'card brand-card';
     card.style.setProperty('--brand-color', getBrandColor(bKey));
@@ -536,6 +555,8 @@ function renderBrandCards(brandData) {
           <span class="reset-badge${styleWeekly.class}" title="${escapeHtml(resetWeeklyTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
           ${forecastWeeklyLabel ? `<span class="forecast-badge" title="At current burn rate, weekly budget exhausted around ${forecastWeeklyLabel}">⚡ exhausted ~${forecastWeeklyLabel}</span>` : ''}
         </div>
+
+        ${contextWindowHtml}
       </div>
     `;
     elements.brandCardsContainer.appendChild(card);
