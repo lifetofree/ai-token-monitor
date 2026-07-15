@@ -482,13 +482,19 @@ function renderBrandCards(brandData) {
     const forecast5hLabel    = fmtForecast(forecastMs5h);
     const forecastWeeklyLabel = fmtForecast(forecastMs_wk);
 
+    const isError = apiQuota && apiQuota.error && apiQuota.unit !== 'missing_key';
+    const errorTooltip = isError ? `Quota sync failed: ${apiQuota.error}` : '';
+    const errorIndicator = isError
+      ? `<span class="quota-error-indicator" style="color: var(--danger); cursor: help; margin-left: 6px; font-size: 14px;" title="${escapeHtml(errorTooltip)}">⚠️</span>`
+      : '';
+
     const card = document.createElement('div');
     card.className = 'card brand-card';
     card.style.setProperty('--brand-color', getBrandColor(bKey));
 
     card.innerHTML = `
       <div class="brand-card-header">
-        <span class="brand-name">${escapeHtml(meta.name)}</span>
+        <span class="brand-name">${escapeHtml(meta.name)}${errorIndicator}</span>
         <span class="brand-cost-title">${rtkSpend ? rtkSpend.requestsWeekly : data.requests} reqs</span>
       </div>
 

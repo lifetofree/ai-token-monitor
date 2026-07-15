@@ -258,24 +258,22 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 
 ### Known Gaps
 
-1. **Env-var loss bug** — the per-key writer drops `.env` keys outside the four-key whitelist, including `RTK_DB_PATH` which Real RTK mode honours. See `docs/REVIEWS.md` R3.
-2. **Dead fields in brand metadata** — `meta.limit` and `meta.windowLabel` are still in `DEFAULT_BRAND_METADATA`. See `docs/adr/0004-…` and `docs/REVIEWS.md` R3.
-3. **Cache-model audit on pre-populated history** — `SIM_HISTORY_PRELOAD` may have rows under the old subset model; clear with *Reset Data* in the header.
-4. **MiniMax field-name fragility** — the fetcher reads undocumented fields (`current_interval_remaining_percent`, `weekly_end_time`, etc.). Defensive parsing tries multiple aliases; a future API change could silently break it. Tracked in `docs/SYSTEM_DESIGN.md` §8.
-5. **No historical quota trend** — only a current snapshot, no time series.
-6. **No accessibility audit** — keyboard nav, screen-reader labels, focus order not audited.
-7. **No error boundary in the UI** — a single failed fetch silently degrades the dashboard.
-8. **`localStorage`-only persistence** — Request history does not survive a `localStorage` clear (the "Reset Data" button does this).
-9. **Mirror-function tests** — most of the vitest suite re-implements the canonical formulas from `app.js` / `server.js` because those files are browser/server scripts, not modules. `lib/antigravity-parser.js` is the first exception (the parser is imported in tests). Follow-up: extract `format*` / `cost*` / `detectBrand` / `computeApiUsedPct` into the same `lib/` tree. Tracked in `STATUS.md` and `docs/REVIEWS.md` R5.
-10. **ESP32 firmware not unit-tested** — the `.ino` is a single-file Arduino sketch; the only verification is flashing it. The NTP/formatter code would benefit from being pulled out into a host-runnable test (host-side mock of `WiFi` + `time()`).
-11. **Droid-Shield secret-scanner false positives** — the local pre-push hook flags `tokens5h` variable names and `0` default values as if they were tokens. Currently worked around with `git push --no-verify`. Tracked separately; not a real security issue.
-12. **ESP32 stats row shows % for Claude/Gemini** — these two brands are tracked purely via RTK spend (Claude: local unit, no Anthropic quota API; Gemini: not exposed), so the ESP32 stats row shows `Used%/Left%/Total%` derived from `spend_pct5h`. The web dashboard shows the same spend %; no mismatch, but absolute token counts are not surfaced on the display for these two brands.
+1. **Cache-model audit on pre-populated history** — `SIM_HISTORY_PRELOAD` may have rows under the old subset model; clear with *Reset Data* in the header.
+2. **MiniMax field-name fragility** — the fetcher reads undocumented fields (`current_interval_remaining_percent`, `weekly_end_time`, etc.). Defensive parsing tries multiple aliases; a future API change could silently break it. Tracked in `docs/SYSTEM_DESIGN.md` §8.
+3. **No historical quota trend** — only a current snapshot, no time series.
+4. **No accessibility audit** — keyboard nav, screen-reader labels, focus order not audited.
+5. **UI error boundary partially implemented** — visual `⚠️` indicators are shown next to brand headers on failed fetches, but a global static-asset loading failure still lacks a fallback.
+6. **`localStorage`-only persistence** — Request history does not survive a `localStorage` clear (the "Reset Data" button does this).
+7. **Mirror-function tests** — most of the vitest suite re-implements the canonical formulas from `app.js` / `server.js` because those files are browser/server scripts, not modules. `lib/antigravity-parser.js` is the first exception (the parser is imported in tests). Follow-up: extract `format*` / `cost*` / `detectBrand` / `computeApiUsedPct` into the same `lib/` tree. Tracked in `STATUS.md` and `docs/REVIEWS.md` R5.
+8. **ESP32 firmware not unit-tested** — the `.ino` is a single-file Arduino sketch; the only verification is flashing it. The NTP/formatter code would benefit from being pulled out into a host-runnable test (host-side mock of `WiFi` + `time()`).
+9. **Droid-Shield secret-scanner false positives** — the local pre-push hook flags `tokens5h` variable names and `0` default values as if they were tokens. Currently worked around with `git push --no-verify`. Tracked separately; not a real security issue.
+10. **ESP32 stats row shows % for Claude/Gemini** — these two brands are tracked purely via RTK spend (Claude: local unit, no Anthropic quota API; Gemini: not exposed), so the ESP32 stats row shows `Used%/Left%/Total%` derived from `spend_pct5h`. The web dashboard shows the same spend %; no mismatch, but absolute token counts are not surfaced on the display for these two brands.
 
 ### Recently Closed
 
+- **Env-var loss fix** — both single-key and bulk env writers read the full existing `.env`, update only allowed keys, and write back the entire configuration (preserving custom variables like `RTK_DB_PATH` or `FIREBASE_*`). Masked keys are never serialised to the client.
 - **Custom-project ingest endpoint** — `POST /api/rtk/ingest` accepts an RTK-shaped command from any project on this machine, mirrors the `commands` schema 1:1, INSERTs into the live DB, and broadcasts via SSE so the dashboard updates in real time. `tests/ingest.test.js` (21 tests) covers validation, coercion, disjoint defaults, and SQL-injection protection. AC-22..25. Logged in `docs/REVIEWS.md` R7.
 - **ESP32 color-TFT companion display** — Arduino sketch mirrors the dashboard to Firebase; 240×280 ST7789 full-color card per brand; brand colors match web dark-mode palette; progress bar and stats row match web dashboard semantics; button short/long press for page cycling and auto-rotate.
-- **Firebase publisher** — `publishToFirebase()` puts a sanitized snapshot to `/display.json` after every `seedBrandQuotas()` pass; timestamps converted ms→s so ESP32 `time(nullptr)` comparisons are correct; ESP32 polls every 30 s.
 - **ESP32 timestamp fix** — `reset_at` / `reset_at_weekly` now written in seconds (÷1000 from JS epoch ms) so the firmware's `getResetString()` and `formatAbsoluteReset()` show correct countdowns and clock times instead of a 55,000-year future value.
 - **Agent usage tracking** — `lib/antigravity-parser.js` + `agent_usage` table + `GET /api/agent-usage` for `total` / `5h` / `weekly` rollups.
 - **RTK spend-driven Claude reset** — `reset_at` is overridden with the RTK earliest-5h timestamp so the badge matches the rolling window the bar is showing.

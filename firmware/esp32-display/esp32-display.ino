@@ -486,17 +486,18 @@ void drawHeader() {
   gfx->fillRect(0, 0, SCREEN_WIDTH, HEADER_H, COLOR_CARD_BG);
   gfx->drawFastHLine(0, HEADER_H - 1, SCREEN_WIDTH, COLOR_BORDER);
 
-  // Clock (left, size 3 = 24px)
+  // Date (left, size 2)
+  gfx->setTextSize(2);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(12, 10);
+  gfx->print(dateText);
+
+  // Clock (center, size 3 = 24px)
   gfx->setTextSize(3);
   gfx->setTextColor(COLOR_WHITE);
-  gfx->setCursor(12, 4);
+  int clockW = clockText.length() * CHAR_W_SIZE3;
+  gfx->setCursor((SCREEN_WIDTH - clockW) / 2, 4);
   gfx->print(clockText);
-
-  // Date (right of clock, size 1)
-  gfx->setTextSize(1);
-  gfx->setTextColor(COLOR_TXT_MUTED);
-  gfx->setCursor(130, 14);
-  gfx->print(dateText);
 
   // WiFi (right top, centered vertically)
   drawWiFiSignal(SCREEN_WIDTH - 40, 6);
@@ -540,58 +541,72 @@ void drawBrandRow(int x, int y, int brandIndex, const AIData& data) {
   uint16_t pctWkColor = getBarColorForPct(pctWk, data.brand_color);
   char pctStr[8];
 
-  // ── Header: icon + brand name (size 2 for readability) ──────────
+  // ── Header: icon + brand name (size 1 — compact to fit dual reset rows) ─
   int iconSize = 20;
-  drawBrandIcon(brandIndex, ix, y + 4, iconSize, data.brand_color);
-  gfx->setTextSize(2);
+  drawBrandIcon(brandIndex, ix, y + 6, iconSize, data.brand_color);
+  gfx->setTextSize(1);
   gfx->setTextColor(COLOR_WHITE);
-  gfx->setCursor(ix + iconSize + 10, y + 8);
+  gfx->setCursor(ix + iconSize + 8, y + 10);
   gfx->print(data.name);
 
   // ── 5H quota block ───────────────────────────────────────────────
-  // label (left) + big % (right)
   gfx->setTextSize(1);
   gfx->setTextColor(COLOR_TXT_MUTED);
-  gfx->setCursor(ix, y + 36);
+  gfx->setCursor(ix, y + 32);
   gfx->print("5-HOUR");
 
   gfx->setTextSize(2);
   gfx->setTextColor(pct5hColor);
   sprintf(pctStr, "%d%%", pct5h);
   int pctW = strlen(pctStr) * CHAR_W_SIZE2;
-  gfx->setCursor(ix + iw - pctW, y + 32);
+  gfx->setCursor(ix + iw - pctW, y + 28);
   gfx->print(pctStr);
 
-  drawProgressBarH(ix, y + 48, iw, 12, pct5h, data.brand_color);
+  drawProgressBarH(ix, y + 44, iw, 12, pct5h, data.brand_color);
 
   // ── Weekly quota block ───────────────────────────────────────────
   gfx->setTextSize(1);
   gfx->setTextColor(COLOR_TXT_MUTED);
-  gfx->setCursor(ix, y + 70);
+  gfx->setCursor(ix, y + 62);
   gfx->print("WEEKLY");
 
   gfx->setTextSize(2);
   gfx->setTextColor(pctWkColor);
   sprintf(pctStr, "%d%%", pctWk);
   pctW = strlen(pctStr) * CHAR_W_SIZE2;
-  gfx->setCursor(ix + iw - pctW, y + 66);
+  gfx->setCursor(ix + iw - pctW, y + 58);
   gfx->print(pctStr);
 
-  drawProgressBarH(ix, y + 82, iw, 12, pctWk, data.brand_color);
+  drawProgressBarH(ix, y + 74, iw, 12, pctWk, data.brand_color);
 
-  // ── Reset info (size 1) ──────────────────────────────────────────
-  String absoluteTime = formatAbsoluteReset(data.quota5h.reset_at);
-  String countdown    = getResetString(data.quota5h.reset_at);
+  // ── Reset info — dual rows (5h + weekly) ─────────────────────────
+  // Row 1: 5-hour window — absolute time (left), countdown (right)
+  String abs5h = formatAbsoluteReset(data.quota5h.reset_at);
+  String cnt5h = getResetString(data.quota5h.reset_at);
   gfx->setTextSize(1);
   gfx->setTextColor(COLOR_TXT_MUTED);
-  gfx->setCursor(ix, y + 100);
-  gfx->print("reset ");
-  gfx->print(absoluteTime);
+  gfx->setCursor(ix, y + 94);
+  gfx->print("5h ");
+  gfx->print(abs5h);
 
-  String inStr = "in " + countdown;
-  int inW = inStr.length() * CHAR_W_SIZE1;
-  gfx->setCursor(ix + iw - inW, y + 100);
-  gfx->print(inStr);
+  String inStr5h = "in " + cnt5h;
+  int inW5h = inStr5h.length() * CHAR_W_SIZE1;
+  gfx->setCursor(ix + iw - inW5h, y + 94);
+  gfx->print(inStr5h);
+
+  // Row 2: weekly window — day+time (left), countdown (right)
+  String absWk = formatAbsoluteResetWithDay(data.quotaWeekly.reset_at);
+  String cntWk = getResetString(data.quotaWeekly.reset_at);
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(ix, y + 106);
+  gfx->print("wk ");
+  gfx->print(absWk);
+
+  String inStrWk = "in " + cntWk;
+  int inWk = inStrWk.length() * CHAR_W_SIZE1;
+  gfx->setCursor(ix + iw - inWk, y + 106);
+  gfx->print(inStrWk);
 }
 
 // =====================================================================

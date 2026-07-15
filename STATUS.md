@@ -88,11 +88,10 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 ## ❌ Known gaps
 
 - **Cache model in pre-populated history**: `generateInitialMockHistory()` and the cost path now use the disjoint model (per ADR-0003), but the pre-populated `SIM_HISTORY_PRELOAD` may still emit `inputTokens` values that look small relative to historical `savedTokens`; a follow-up audit is in the Reviewer's R5 scope
-- **`windowLabel` and `meta.limit` still in `DEFAULT_BRAND_METADATA`** — see ADR-0004 and `docs/REVIEWS.md` R3
 - `localStorage` only — no cross-restart persistence for Request history
 - Limit labels are hardcoded English; would need i18n
 - No accessibility audit (keyboard nav, screen reader labels)
-- No error boundary in the UI — a single failed fetch silently degrades the dashboard
+- UI error boundary partially implemented (visual sync errors shown per brand card); static assets loading still lacks a global fallback
 - No historical quota trend chart (only current snapshot)
 
 ---
