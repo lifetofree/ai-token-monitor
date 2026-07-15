@@ -80,8 +80,31 @@ This file tracks the handoff and implementation status of the AI Token Monitor a
 - **[README.md](./README.md)**: Project overview, setup guide, current Known Gaps.
 - **[.ai.agents/README.md](./.ai.agents/README.md)**: Concept and workflow details for the role-based multi-agent development team.
 - **[CONTEXT.md](./CONTEXT.md)**: Reference dictionary defining the project's ubiquitous language.
-- **[docs/](./docs/)**: Role-chain artifacts (BUSINESS_GOALS, REQUIREMENTS, USER_JOURNEY, TECH_STACK, SYSTEM_DESIGN, REVIEWS) plus `docs/adr/0001` through `0008` (0007: ESP32 Firebase companion display; 0008: Claude RTK-only, no Anthropic probe).
+- **[docs/](./docs/)**: Role-chain artifacts (BUSINESS_GOALS, REQUIREMENTS, USER_JOURNEY, TECH_STACK, SYSTEM_DESIGN, REVIEWS) plus `docs/adr/0001` through `0009` (0007: ESP32 Firebase companion display; 0008: Claude RTK-only, no Anthropic probe; 0009: restore `%` bars on the Antigravity card).
 - **[STATUS.md](./STATUS.md)**: Central state tracker showing role progress and status checkpoints.
+
+---
+
+## 🆕 R8 update — 2026-07-15
+
+Three commits on `dev` since the last status snapshot. Status legend: `[x]` complete, `[~]` partial, `[ ]` not started.
+
+- [x] **💻 TDD Engineer**: Replaced the parser's chars/4 heuristic with the Gemini `countTokens` API path (when `GEMINI_API_KEY` is set in `.env`). Cache + try/catch + heuristic fallback all live behind `wrapCounter()` in `lib/antigravity-parser.js` so tests can swap the client freely.
+- [x] **💻 TDD Engineer**: New `lib/antigravity-context.js` helper (active-session filter, 1M default size, `GEMINI_CONTEXT_WINDOW` env override). Wired into `/api/agent-usage` and exposed to the UI as `state.agentUsage.contextWindow`.
+- [x] **🕵️ Reviewer**: R8 pass in `docs/REVIEWS.md` covering the three commits. 6 ✅, 3 ⚠️ documented gaps, 0 ❌ regressions.
+- [x] **🏗️ Architect**: ADR `0009-restore-antigravity-percent-bars.md` documents the decision to drop the `isAntiqravity` ternary and use the unified bar template on the gemini card.
+- [x] **📋 Product Manager**: AC-26 / AC-27 / AC-28 added to `docs/REQUIREMENTS.md`. `CHANGELOG.md` created (was missing).
+- [x] **🚀 DevOps Engineer**: `package.json` now lists `@google/generative-ai` as a runtime dep. No CI change required (the new `tests/antigravityContext.test.js` is picked up by `npm test` automatically).
+
+### R8 Test Status
+
+- Vitest suite: **20 files, 223 tests, ~530 ms**.
+- New coverage: `tests/antigravityContext.test.js` (6 tests) covers empty rows, sqlite error, numerator excludes outputTokens, 100 % clamp, explicit-size override. `tests/antigravityParser.test.js` extended with 5 new `countTokensFor` cases (heuristic, injected client, cache, integration, error-fallback).
+
+### R8 Open Items (carried over)
+
+- Dead `contextWindowHtml` block in `app.js` from `8e23249` — the unified card template no longer references it. Kept on disk for now as scaffolding for a future context-window bar; removal is a 6-line patch (`git diff 8e23249 -- app.js | grep '^-' | head` will surface the exact lines).
+- `lib/antigravity-parser.js` now depends on `@google/generative-ai` at runtime; if `GEMINI_API_KEY` is not set, the SDK is `require`d lazily inside `getCounter()` so cold-start cost is zero.
 
 ---
 

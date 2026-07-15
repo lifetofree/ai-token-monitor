@@ -84,6 +84,13 @@ _Avoid_: rtk binary, rtk CLI
 The dollars avoided on a Request because of cache hits, computed as `savedTokens * inputRate / 1_000_000`. A cross-cutting metric on Request, not a property of any Brand.
 _Avoid_: saved cost, cache savings
 
+**Context Window**:
+The model's maximum input+output token budget for a single conversation. The default reference value used by the dashboard for the Gemini brand card is 1,000,000 tokens (matching Gemini 1.5 Pro / 2.0 Flash / 2.5 Pro). Override via `GEMINI_CONTEXT_WINDOW` (e.g. set to 2,000,000 on a 2.0 Pro max plan). The Antigravity brand card surfaces the active conversation's consumption against this window as a "Session Memory" bar.
+_Avoid_: token limit, context size
+
+**Active Session**:
+The Antigravity CLI conversation whose transcript has been modified within the last `ACTIVE_SESSION_MS = 30 minutes`. The dashboard identifies the active session via `agent_usage.last_updated` and renders its context-window consumption on the Antigravity brand card. When no conversation has been touched in that window, the bar is hidden — there is no "active" session to track.
+
 **Simulation**:
 The Monitor Mode that generates synthetic traffic on a randomized 8-20s schedule. Useful for offline development, demos, and the absence of real RTK data.
 _Avoid_: sim mode, mock mode, simulator (a verb, not the noun)

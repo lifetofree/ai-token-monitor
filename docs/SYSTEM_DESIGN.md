@@ -7,10 +7,11 @@
 A two-process, single-machine system, with an optional hardware companion:
 
 - **Browser process**: `index.html` + `styles.css` + `app.js`. Renders the dashboard; reads/writes `localStorage`; supports both Real RTK Monitor (default) and Simulation modes; consumes the `/api/seed-quotas` snapshot to drive the API-aware progress bars and reset-time badges.
-- **Server process**: `server.js`. Static file server plus **nine** JSON/SSE endpoints across three concerns:
+- **Server process**: `server.js`. Static file server plus **ten** JSON/SSE endpoints across four concerns:
   - **`.env` I/O**: `GET /api/env` (only ever returns the four provider keys, masked), `POST /api/env`, `POST /api/env/key`
   - **Real RTK Monitor**: `GET /api/rtk` (full snapshot), `GET /api/rtk/summary` (aggregate summary), `GET /api/rtk/stream` (SSE for incremental updates), `POST /api/rtk/ingest` (single-command ingest from non-RTK clients)
   - **Provider-quota cache**: `GET /api/seed-quotas` (cached snapshot), `POST /api/seed-quotas` (force-refresh)
+  - **Antigravity CLI usage**: `GET /api/agent-usage` (per-conversation totals across `total` / `5h` / `weekly` windows plus an active-session Context Window payload — see §3.8 and §6.5)
 - **Outbound HTTPS clients**: (1) `fetchMinimaxQuota` makes a `GET` to `https://www.minimax.io/v1/token_plan/remains` with `Authorization: Bearer <MINIMAX_API_KEY>`; (2) `lib/firebase.js` PUTs a sanitised snapshot to `<FIREBASE_URL>/display.json?auth=<FIREBASE_AUTH>` for the ESP32 companion. GLM reads quota from in-band response headers on a probe request. Claude makes **no** outbound call (RTK-only, `unit: 'local'`).
 - **ESP32 companion** (optional): `firmware/esp32-display/esp32-display.ino` runs on an ESP32 + ST7789 240×280 TFT, polling the Firebase `display.json` node and rendering one brand per page. Enabled only when `FIREBASE_URL`/`FIREBASE_AUTH` are present in `.env`. See ADR-0007.
 
@@ -35,10 +36,12 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 ├── STATUS.md               # Project status snapshot
 ├── README.md               # Project overview and Known Gaps
 ├── lib/
-│   ├── antigravity-parser.js  # Parses Antigravity CLI transcript .jsonl files
+│   ├── antigravity-parser.js  # Parses Antigravity CLI transcript .jsonl files; Gemini countTokens path with chars/4 fallback
+│   ├── antigravity-context.js # Active-session context-window resolver for /api/agent-usage
 │   ├── firebase.js            # Publishes quota snapshot to Firebase RTDB for the ESP32 mirror
 ├── tests/
-│   ├── antigravityParser.test.js
+│   ├── antigravityParser.test.js   # 13 tests; covers the countTokensFor() contract
+│   ├── antigravityContext.test.js  # 6 tests; active-session filter, numerator, clamp, size override
 │   ├── computeApiUsedPct.test.js
 │   ├── cost.test.js
 │   ├── csv.test.js
@@ -73,7 +76,8 @@ The server **owns** the `brand_quota` SQLite table (idempotent migrations for `r
 │       ├── 0005-remove-real-rtk-mode.md          # SUPERSEDED by 0006
 │       ├── 0006-reintroduce-real-rtk-mode.md
 │       ├── 0007-esp32-firebase-companion-display.md
-│       └── 0008-claude-rtk-only-no-anthropic-probe.md
+│       ├── 0008-claude-rtk-only-no-anthropic-probe.md
+│       └── 0009-restore-antigravity-percent-bars.md
 └── .ai.agents/             # Role rules (see *.md)
 ```
 
@@ -190,6 +194,25 @@ The `source` field is no longer a vestigial `'sim'` constant. It is set to:
 - `'sim'` by the simulator and the pre-populated mock history
 
 The `getActiveRequests()` filter selects the active array based on `state.monitorMode`.
+
+### 3.8 ContextWindow (Antigravity active session)
+
+The dashboard surfaces the active Antigravity CLI session's consumption against the model's context window on the gemini brand card. The `agent_usage` table (one row per `conversation_id`, populated by `syncAgentUsage()` from `lib/antigravity-parser.js`) is the source of truth.
+
+```ts
+interface ContextWindow {
+  used: number;          // inputTokens + cachedTokens (cached is part of the window but not re-billed)
+  remaining: number;     // 100 - usedPct, clamped to [0, 100]
+  usedPct: number;       // Math.min(100, Math.round((used / size) * 100))
+  size: number;          // 1_000_000 default; GEMINI_CONTEXT_WINDOW env override (e.g. 2_000_000 for 2.0 Pro max)
+  source: 'active';      // reserved for future multi-source aggregation
+  lastUpdated: number;   // epoch ms — the active row's last_updated
+}
+```
+
+The "active" filter is `last_updated >= now - ACTIVE_SESSION_MS` where `ACTIVE_SESSION_MS = 30 * 60 * 1000`. The resolver lives in `lib/antigravity-context.js` (`computeContextWindow(dbPath, opts)`) and accepts an `opts.execFile` injection seam so unit tests can mock `child_process.execFile` cleanly — see §7 for the DI pattern rationale.
+
+The UI renders the payload as a single Session Memory bar (used % vs the size cap). It is gated to `bKey === 'gemini'` because the Antigravity CLI is the only client tracked via `agent_usage`. The server still returns the payload for every brand key in `/api/agent-usage`; the UI ignores it for the other three.
 
 ## 4. API contracts
 
@@ -360,6 +383,25 @@ After a successful INSERT the row is broadcast to all open SSE clients via `broa
 
 No auth — the loopback CORS allowlist (`http://localhost:*` / `http://127.0.0.1:*`) is the trust boundary. Documented in `docs/REVIEWS.md` R7.
 
+### 4.10 `GET /api/agent-usage`
+
+Returns aggregated token and cost metrics from the `agent_usage` table (one row per Antigravity CLI conversation, populated by `syncAgentUsage()` in `server.js`), plus a ContextWindow payload (§3.8) for the most recently updated conversation within `ACTIVE_SESSION_MS`.
+
+**Response (200)**
+
+```json
+{
+  "total":     { "conversationsCount": 67, "inputTokens": 132276, "outputTokens": 3186379, "cachedTokens": 0, "totalCost": 16.09724, "earliestTimestamp": 1779268093845 },
+  "window5h":  { "conversationsCount": 16, "inputTokens": 30695,  "outputTokens": 420523,  "cachedTokens": 0, "totalCost": 2.14098375, "earliestTimestamp": 1784112692294 },
+  "weekly":    { "conversationsCount": 21, "inputTokens": 36664,  "outputTokens": 499847,  "cachedTokens": 0, "totalCost": 2.545065, "earliestTimestamp": 1784091975209 },
+  "contextWindow": { "used": 11716, "remaining": 99, "usedPct": 1, "size": 1000000, "source": "active", "lastUpdated": 1784117434448 }
+}
+```
+
+`contextWindow` is `null` when no `agent_usage` row has been updated within `ACTIVE_SESSION_MS = 30 minutes`. The "size" field defaults to `1_000_000` (Gemini 1.5 Pro / 2.0 Flash / 2.5 Pro context window) and is overridable via the `GEMINI_CONTEXT_WINDOW` env var.
+
+The underlying counts (`inputTokens`, `outputTokens`) come from `lib/antigravity-parser.js countTokensFor()`. When `GEMINI_API_KEY` is set in `.env` the parser calls the Gemini `countTokens` API for each unique string with a process-local cache; on error (429, network) or when no key is configured it falls back to `Math.ceil(text.length / 4)`. See §7.
+
 ## 5. Component hierarchy
 
 ### 5.1 Client
@@ -405,6 +447,7 @@ http.createServer()
 ├── POST /api/rtk/ingest        # INSERT INTO commands + broadcastToClients (R7)
 ├── GET  /api/seed-quotas       # SELECT FROM brand_quota
 ├── POST /api/seed-quotas       # seedBrandQuotas(force)
+├── GET  /api/agent-usage       # totals UNION ALL + computeContextWindow(DB_PATH) (R8)
 └── static fallback             # whitelist check, fs.readFile
 
 ensureBrandQuotaTable()         # CREATE + idempotent ALTER TABLE
@@ -542,6 +585,53 @@ ESP32 firmware (firmware/esp32-display/esp32-display.ino)
 
 The mirror is **append-only output**: the server only ever PUTs to `display.json`; the ESP32 only reads. No inbound path from the ESP32 to the dashboard. Reset timestamps are divided ms→s in `lib/firebase.js` because the firmware uses `time(nullptr)` (seconds).
 
+### 6.5 Antigravity CLI usage + active session context window
+
+```
+boot (server.js)
+   │
+   ├── loadEnv(STATIC_ROOT)
+   └── if env.GEMINI_API_KEY → _setGeminiKey(env.GEMINI_API_KEY)
+                                   (parser module-level switch from chars/4 to real countTokens path)
+
+syncAgentUsage()  (debounced after transcript mtime change)
+   │
+   ├── parseAllTranscripts()              # lib/antigravity-parser.js
+   │     ├── read brain directory         # ~/.gemini/antigravity-cli/brain
+   │     ├── skip conversations whose transcript mtimeMs is unchanged  (parserCache)
+   │     └── for each changed transcript:
+   │           ├── read lines
+   │           └── for each line:
+   │                 ├── USER_EXPLICIT / SYSTEM → inputTokens += countTokensFor(content)
+   │                 └── MODEL / SUBAGENT    → outputTokens += countTokensFor(content + tool_args)
+   └── INSERT OR REPLACE INTO agent_usage (conversation_id, last_updated, input_tokens, output_tokens, cached_tokens, total_cost)
+
+GET /api/agent-usage
+   │
+   ├── totals UNION ALL: total | window5h (last_updated >= now-5h) | weekly (last_updated >= now-7d)
+   └── computeContextWindow(DB_PATH, { now })
+         │
+         ├── SELECT input_tokens, cached_tokens, last_updated FROM agent_usage
+         │   WHERE last_updated >= now - ACTIVE_SESSION_MS (30 min)
+         │   ORDER BY last_updated DESC LIMIT 1
+         │
+         ├── if no row → contextWindow = null
+         └── else:
+               used = input_tokens + cached_tokens
+               usedPct = Math.min(100, Math.round((used / size) * 100))   # size defaults to 1_000_000
+               return { used, remaining: 100 - usedPct, usedPct, size, source: 'active', lastUpdated }
+
+Client (app.js)
+   │
+   ├── state.agentUsage = response
+   └── renderBrandCards():
+         for bKey === 'gemini':
+           cw = state.agentUsage.contextWindow
+           if cw → render Session Memory bar (width = cw.usedPct%, tooltip names the 1M model cap)
+```
+
+The parser's `countTokensFor` is wrapped in `wrapCounter()` (§7) which provides a process-local cache keyed by the input string and a try/catch that falls back to `chars/4` on any error. The wrapper is the same code path for the live `@google/generative-ai` SDK and for any injected test client, so production and tests share the contract.
+
 ## 7. Design patterns in use
 
 - **Safe DOM construction**: `appendConsoleLine(source, parts)` distinguishes `{html}` (trusted) from `{text}` (escaped). All untrusted input goes through `{text}`. RTK `original_cmd` is rendered through `{text}` segments in the Real-Time log path.
@@ -552,6 +642,8 @@ The mirror is **append-only output**: the server only ever PUTs to `display.json
 - **Defensive API parsing** (MiniMax fetcher): `fetchMinimaxQuota` tries three wrapper shapes (`model_remains` / `data.model_remains` / `remains`), prefers chat-model entries by name regex (`/M3|M2\.7|M2\.5|M2\b/`), separates the 5h vs weekly window by `(end_time - start_time)` delta, and falls back to the embedded `weekly_end_time` field when no separate weekly entry exists. Multiple field-name aliases are tried for `remaining` / `limit_value` / `weekly_remaining` to absorb API drift.
 - **SQLite query construction**: all SQL is built via `escapeSQLString` / `escapeSQLNumber` helpers; no string interpolation of user-supplied values. `child_process.execFile('sqlite3', …)` is used (not `exec`) so the command is array-form and not subject to shell parsing.
 - **SSE connection cleanup**: the server holds open SSE clients in `sseClients[]`; `req.on('close')` removes the client. New commands are broadcast by `forEach(client => client.write(...))`. No backpressure handling — clients are expected to be fast.
+- **Counter wrapping (`lib/antigravity-parser.js wrapCounter`)**: any upstream token counter — the real `@google/generative-ai` `countTokens`, or a test mock — is funneled through a single function that adds a process-local text-keyed cache and a try/catch fallback to the `chars/4` heuristic. Production and tests share the contract because the wrapping is the contract.
+- **Dependency injection for `child_process`**: helpers that need `execFile` (e.g. `lib/antigravity-context.js computeContextWindow`) accept `opts.execFile` rather than calling `require('child_process').execFile` at module scope. `vi.mock('child_process', …)` does not intercept `require()` from CommonJS modules in this stack, so DI is the only way to keep unit tests honest.
 
 ## 8. Known design gaps (from `../STATUS.md`)
 
@@ -562,3 +654,5 @@ The mirror is **append-only output**: the server only ever PUTs to `display.json
 - **No error boundary**: a single failed fetch silently degrades the dashboard; the user sees zeros and a system log message.
 - **No accessibility audit**: focus traps, keyboard nav, and screen reader labels are partially implemented; not verified end-to-end.
 - **No historical quota trend chart**: only the current snapshot is shown.
+- **Dead `contextWindowHtml` block in `app.js`**: the interpolation block added in commit `8e23249` is no longer referenced by the unified card template (commit `8ee1283`). Kept on disk for now as scaffolding; tracked in R8-X1.
+- **Antigravity CLI `unit: 'not_exposed'`**: `BRAND_FETCHERS.gemini.fetchGeminiQuota` reports `not_exposed` because Google does not publish a 5h/weekly quota API. The gemini brand bar therefore always shows local-spend fill; the bar in `8ee1283` does not improve on this. To get API-driven fill on the gemini card, `fetchGeminiQuota` would need to gain a percent-remaining signal (not currently feasible).

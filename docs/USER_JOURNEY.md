@@ -46,6 +46,15 @@ This is the user explicitly checking the **provider-authoritative** view — the
 3. **Drill into a Brand card** to see its 5-Hour and Weekly bars; the cache effect is implicitly visible in the lower-than-expected Cost.
 4. **Export CSV** to share the numbers (e.g. paste into a notebook).
 
+## Tertiary journey: "How much of my active Antigravity CLI session is consuming the model's context window?"
+
+1. **Open the dashboard.** The page loads at `http://localhost:3838`. The header mode switcher is set to "Real RTK Monitor" by default; that is unrelated to this journey, which reads from a different data source (Antigravity CLI's `~/.gemini/antigravity-cli/brain` directory).
+2. **Glance at the Antigravity brand card.** Below the 5-Hour and Weekly bars, a third row shows "Session Memory" — a single fill against a 1,000,000-token cap (the Gemini 1.5 Pro / 2.0 Flash / 2.5 Pro context window). The bar shows how much of the model's context window is being consumed by the **currently active** Antigravity conversation.
+3. **Read the row labels.** The row reads e.g. `99% remaining of 1M` with `1% used` on the right. Hover the bar for a tooltip that names the model class and notes the `GEMINI_CONTEXT_WINDOW` override env var.
+4. **Cross-check with `state.agentUsage.contextWindow.lastUpdated`.** This epoch-ms timestamp is the `last_updated` of the `agent_usage` row the bar is driven by. If the timestamp is older than 30 minutes, the bar is hidden — Antigravity CLI has been idle for at least that long, so there is no "active" session to track.
+5. **If the bar is hidden but the conversation feels active**, check that the Antigravity CLI is running and that `lib/antigravity-parser.js syncAgentUsage()` is writing to the `agent_usage` table. The parser logs errors to stderr; the most common failure is a permissions change on the brain directory.
+6. **Verify the underlying counts are real, not estimated.** When `GEMINI_API_KEY` is set in `.env`, the parser calls the Gemini `countTokens` API for each unique string. The bar's numerator is therefore the **exact** token count, not a `chars/4` approximation. To confirm, check the server boot log for `_setGeminiKey` having been called.
+
 ## Tertiary journey: "Show me what the dashboard looks like (Simulation)."
 
 1. **Select "Simulation"** from the monitor mode dropdown in the header.

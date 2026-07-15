@@ -88,7 +88,7 @@ Coding-agent sessions (Antigravity CLI in particular) record input / output / ca
 - Aggregates by `last_updated` into three windows: `total`, `5h`, `weekly` (matches the rolling-window semantics used elsewhere).
 - Persists into the `agent_usage` SQLite table so the dashboard can chart a single rolling number without re-parsing transcripts.
 
-The parser lives in [`lib/antigravity-parser.js`](./lib/antigravity-parser.js) and is unit-tested in `tests/antigravityParser.test.js` (4 cases). Token estimation uses the standard `~4 chars / token` heuristic for the textual parts of the transcript; the parser never modifies the source files.
+The parser lives in [`lib/antigravity-parser.js`](./lib/antigravity-parser.js) and is unit-tested in `tests/antigravityParser.test.js` (13 cases). **When `GEMINI_API_KEY` is set in `.env`, each unique string is counted via the Gemini `countTokens` API with a process-local cache; otherwise the standard `~4 chars / token` heuristic is used.** On boot the server reads `GEMINI_API_KEY` from `.env` and hands it to the parser so the real-counting path activates without a restart. The `lib/antigravity-context.js` helper resolves the active-session context window against a 1M-token default (overridable via `GEMINI_CONTEXT_WINDOW`) and surfaces it as the `contextWindow` field of the `/api/agent-usage` response. The parser never modifies the source files.
 
 ### 5. ESP32 Color-TFT Companion Display
 A separate Arduino sketch (`firmware/esp32-display/esp32-display.ino`) renders a full-color brand card on a **240×280 ST7789 TFT** (1.69"):
@@ -136,13 +136,14 @@ All `original_cmd` text goes through `escapeHtml` before insertion into the DOM 
 - **API-Driven Progress Bars** — bars reflect the provider's used % (not just local spend) when a quota is present; tooltip distinguishes source.
 - **Authoritative Reset Times** — "Resets at HH:MM" badge prefers the provider's `reset_at` / `reset_at_weekly` over the local rolling estimate.
 - **Active Provider Selector** — dropdown in the header to tag all incoming RTK commands with the correct brand when switching between coding agents (Claude Code, Antigravity CLI, etc.). Persisted in `localStorage`.
-- **Agent Usage Tracking** — server-side aggregation of Antigravity CLI session transcripts into `agent_usage`, surfaced via `/api/agent-usage` with `total` / `5h` / `weekly` rollups.
+- **Agent Usage Tracking** — server-side aggregation of Antigravity CLI session transcripts into `agent_usage`, surfaced via `/api/agent-usage` with `total` / `5h` / `weekly` rollups plus an **active-session Context Window payload** (size defaults to 1M tokens; override via `GEMINI_CONTEXT_WINDOW`).
+- **Real Antigravity token counts** — when `GEMINI_API_KEY` is in `.env`, the parser calls Gemini `countTokens` for each unique transcript string with a process-local cache; falls back to the chars/4 heuristic when the key is absent or the API errors.
 - **ESP32 Color-TFT Companion** — Arduino sketch mirrors the dashboard state to Firebase for an at-a-glance 240×280 full-color card display; brand colors match the web dashboard's dark-mode palette; stats row shows Used%/Left%/Total%; reset times match the web via ms→s timestamp conversion in `lib/firebase.js`.
 - **Live Request Log Feed** — real-time SSE stream of new RTK commands; on initial load, surfaces the last 15 LLM-classified commands (shell noise filtered).
 - **Light / Dark Theme** — all form controls, dropdowns, and progress bars are theme-aware via CSS custom properties; custom SVG chevron in both modes; focus glow via `color-mix`.
 - **Compact API Tokens tab** — monospace labels at fixed 170px width, 12px font.
 - **12-hour "Updated" timestamps** — overall and per-brand refresh labels use locale 12hr (`Jun 09, 2026 06:42:11 PM`, `06:42 PM`); reset labels and live log console stay 24hr.
-- **Zero Runtime Dependencies** — pure HTML5, CSS custom variables, vanilla client/server JavaScript. Only devDep is `vitest`.
+- **Minimal Runtime Dependencies** — pure HTML5, CSS custom variables, vanilla client/server JavaScript. Runtime: `@google/generative-ai` (lazy-loaded only when `GEMINI_API_KEY` is set; used by the Antigravity parser's countTokens path). DevDep: `vitest`.
 - **Security baselines** — CORS restricted to `localhost` / `127.0.0.1`; path-traversal protection on the static handler; env-var whitelist (4 provider keys) for the `.env` writer; per-key endpoint returns masked values.
 
 ---
@@ -157,7 +158,7 @@ All `original_cmd` text goes through `escapeHtml` before insertion into the DOM 
 | `GET` | `/api/rtk/stream` | SSE stream of new RTK commands |
 | `POST` | `/api/rtk/ingest` | Ingest a single RTK-shaped command from a non-RTK client. Accepts optional `brand` field (`claude`, `gemini`, `minimax`, `glm`) to override keyword-based brand detection. Mirrors the `commands` schema 1:1; broadcasts via SSE. No auth (loopback CORS allowlist). |
 | `GET` | `/api/rtk/projects` | Per-project 7-day spend breakdown (brand + token counts + cost) |
-| `GET` | `/api/agent-usage` | Agent session rollups (Antigravity CLI transcripts), `total` / `5h` / `weekly` |
+| `GET` | `/api/agent-usage` | Agent session rollups (Antigravity CLI transcripts), `total` / `5h` / `weekly` plus a `contextWindow` payload (active-session usage vs the 1M-token Gemini default cap; `null` when no conversation has been touched in the last 30 min) |
 | `GET` | `/api/seed-quotas` | Brand quota cache (auto-refreshes on stale `reset_at`) |
 | `POST` | `/api/seed-quotas` | Force-refresh the brand quota cache; triggers the Firebase PUT for the ESP32 mirror via the caller |
 | `GET` | `/api/env` | Masked API keys from `.env` |
@@ -271,6 +272,7 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 
 ### Recently Closed
 
+- **Real Antigravity token counting + Session Memory bar (R8)** — `lib/antigravity-parser.js` now calls Gemini `countTokens` for each unique string when `GEMINI_API_KEY` is set in `.env`, with a process-local cache and a chars/4 fallback. New `lib/antigravity-context.js` exposes the active session's consumption against the 1M-token Gemini default (override via `GEMINI_CONTEXT_WINDOW`) as `contextWindow` on `/api/agent-usage`. The Antigravity brand card uses the same `%`-bar template as the other three brands; ADR `0009-restore-antigravity-percent-bars.md` records the decision. 19 new tests (parser + context); suite is now **20 files, 223 tests**. Logged in `docs/REVIEWS.md` R8.
 - **Env-var loss fix** — both single-key and bulk env writers read the full existing `.env`, update only allowed keys, and write back the entire configuration (preserving custom variables like `RTK_DB_PATH` or `FIREBASE_*`). Masked keys are never serialised to the client.
 - **Custom-project ingest endpoint** — `POST /api/rtk/ingest` accepts an RTK-shaped command from any project on this machine, mirrors the `commands` schema 1:1, INSERTs into the live DB, and broadcasts via SSE so the dashboard updates in real time. `tests/ingest.test.js` (21 tests) covers validation, coercion, disjoint defaults, and SQL-injection protection. AC-22..25. Logged in `docs/REVIEWS.md` R7.
 - **ESP32 color-TFT companion display** — Arduino sketch mirrors the dashboard to Firebase; 240×280 ST7789 full-color card per brand; brand colors match web dark-mode palette; progress bar and stats row match web dashboard semantics; button short/long press for page cycling and auto-rotate.
@@ -278,7 +280,7 @@ All seven agent roles are flipped to `[x] Complete` in `STATUS.md`.
 - **Agent usage tracking** — `lib/antigravity-parser.js` + `agent_usage` table + `GET /api/agent-usage` for `total` / `5h` / `weekly` rollups.
 - **RTK spend-driven Claude reset** — `reset_at` is overridden with the RTK earliest-5h timestamp so the badge matches the rolling window the bar is showing.
 - **GLM `window_started_at` fallback** — server-side column gives the 5h reset a stable boundary for brands whose API doesn't expose it.
-- **Vitest suite** — 12 files, 86 tests, ~300 ms. Includes format, cost, `detectBrand`, `computeApiUsedPct`, MiniMax response parsing, Gemini response parsing, RTK spend metrics, GLM 5h reset fallback, Antigravity parser, CSV builder, `escapeHtml`, and the LLM-only log feed filter.
+- **Vitest suite** — 20 files, 223 tests, ~530 ms. Includes format, cost, `detectBrand`, `computeApiUsedPct`, MiniMax response parsing, Gemini response parsing, RTK spend metrics, GLM 5h reset fallback, Antigravity parser (with the Gemini countTokens contract), Antigravity context-window helper, CSV builder, `escapeHtml`, ingest validation/SQLi, mode switching, env round-trip, the LLM-only log feed filter, and parser stress tests.
 - **CI + Docker** — GitHub Actions runs `npm install`, `npm run check`, `npm test`, and a sqlite3 boot probe; `Dockerfile` builds a minimal `node:20-slim` image with a `/api/summary` healthcheck.
 - **Multi-agent SDLC framework** — `.ai.agents/` defines 7 role-based agents (PO, PM, Tech Lead, Architect, Coder, Reviewer, DevOps) with explicit handoffs and `STATUS.md` as the single source of truth.
 - **Antigravity RTK rules** — `.agents/rules/antigravity-rtk-rules.md` captures coding-agent conventions for the RTK CLI / `.rtk/filters.toml`.

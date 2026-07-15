@@ -188,3 +188,87 @@ This pass adds a single-command ingest endpoint so any other project on this mac
 | ⚠️ Documented gap | 0 | — |
 
 `POST /api/rtk/ingest` is now the canonical path for non-RTK projects on this machine to contribute usage to the dashboard. RTK itself remains the default path for shell-wrapped calls.
+
+---
+
+## R8 — Real Antigravity token counting + session-memory context window
+
+This pass covers three commits on `dev`:
+
+- `1bb20bc` — `lib/antigravity-parser.js`: add Gemini `countTokens` API path with chars/4 fallback.
+- `8e23249` — `lib/antigravity-context.js` + `server.js` + `app.js`: `computeContextWindow()` helper (active-session filter, 1M default size) wired into `/api/agent-usage`; boot reads `GEMINI_API_KEY` from `.env`.
+- `8ee1283` — `app.js`: drop the `isAntiqravity` ternary; restore standard `%` bars on the gemini brand card.
+
+The original "context-window bar" UI added in `1d2984e` was dropped during this work because the user explicitly wanted token counts only on the Antigravity card, and then the same user reversed that decision and asked for the bars back. The final state — gemini card uses the standard bar template — is what is reviewed here.
+
+### R8-C1 — Token-count accuracy
+
+- **What was checked**: the parser's `countTokensFor(text)` should return exact token counts when `GEMINI_API_KEY` is configured, and degrade to `Math.ceil(text.length / 4)` otherwise. Errors (e.g. 429, network) must not poison the cache so retries can succeed.
+- **What was found**: ✅ `lib/antigravity-parser.js` exposes `wrapCounter()`, which is the single point of cache + try/catch logic. Both the live `@google/generative-ai` client and any injected mock client flow through the same wrapper, so the contract is identical in production and tests. `tests/antigravityParser.test.js` covers (a) heuristic fallback when no key is set, (b) injected client wins over heuristic, (c) text-keyed cache hit on second call, (d) per-call heuristic fallback on throw.
+- **Action**: none.
+
+### R8-C2 — Parser cache invalidation interaction with countTokens cache
+
+- **What was checked**: the parser-level cache (`parserCache`) keyed by `(conversationId, mtimeMs)` skips re-reading unchanged transcript files. After my change, each line within an unchanged file is now counted through `countTokensFor`, which is itself cached by text content.
+- **What was found**: ✅ unchanged files return the previous stats object without re-counting; the token-count cache is process-local and survives within one parse run, so identical strings across files share a count. `_resetTokenCache()` is exported for tests.
+- **Action**: none.
+
+### R8-C3 — `computeContextWindow` correctness
+
+- **What was checked**: the helper's "active" filter (most recently updated `agent_usage` row within `ACTIVE_SESSION_MS = 30 minutes`), numerator (`inputTokens + cachedTokens`), and denominator (`1_000_000` default, `GEMINI_CONTEXT_WINDOW` env override).
+- **What was found**: ✅ `lib/antigravity-context.js` accepts `opts.execFile` as a dependency-injection seam so the CommonJS / `vi.mock` interception problem does not apply. `tests/antigravityContext.test.js` covers: documented constants, empty-rows case, sqlite error case, numerator excludes `outputTokens`, `100%` clamp, explicit-size override. Six tests, all green.
+- **Action**: none.
+
+### R8-C4 — `/api/agent-usage` shape
+
+- **What was checked**: the endpoint must continue to return `total`, `window5h`, `weekly` plus a `contextWindow` object that matches the helper's contract.
+- **What was found**: ✅ the inline `freshest` UNION ALL was removed; `result.contextWindow` is now populated via `computeContextWindow(DB_PATH, { now }).then(...)`. Live smoke test on `http://localhost:3838/api/agent-usage` shows `{used: 11716, remaining: 99, usedPct: 1, size: 1000000, source: 'active', lastUpdated: 1784117434448}` for the freshest row.
+- **Action**: none.
+
+### R8-S1 — Boot-time `.env` read of `GEMINI_API_KEY`
+
+- **What was checked**: `server.js` boots and immediately hands the key to the parser so the next `syncAgentUsage()` tick uses the API path.
+- **What was found**: ✅ module-top-level `loadEnv(STATIC_ROOT)` + `_setGeminiKey(env.GEMINI_API_KEY)` runs before `http.createServer`. A second instance of the same `loadEnv` already runs inside `seedBrandQuotas`; this third boot-time call is cheap and survives in the parser for the process lifetime.
+- **Action**: none.
+
+### R8-S2 — `execFile` dependency-injection contract
+
+- **What was checked**: vitest's `vi.mock('child_process', …)` does not intercept `require('child_process')` from CommonJS modules. The naive "mock the module" pattern silently no-ops.
+- **What was found**: ⚠️ the original first attempt at `computeContextWindow` used `const { execFile } = require('child_process')` at module scope, which is not mockable in this stack. The fix (DI via `opts.execFile`) is the right pattern; flagged here so future helpers follow it.
+- **Action**: future enhancements that touch `child_process` should accept the executor as an injected `opts.execFile` so the same DI seam applies.
+
+### R8-U1 — Bar restoration on the Antigravity card
+
+- **What was checked**: after `8ee1283`, the `gemini` brand should render the same `5-Hour` and `Weekly` bars as Claude / MiniMax / GLM, sourced from `amounts5h` / `amountsWeekly` / `barPct5h` / `barPctWeekly`.
+- **What was found**: ✅ the `isAntiqravity ? … : …` ternary is gone; `tokens5h` / `tokensWeekly` / `cost5hDisplay` / `costWeeklyDisplay` locals are gone with it. The card uses the unified template.
+- **Action**: none.
+
+### R8-U2 — Context-window bar is no longer rendered
+
+- **What was checked**: commit `8e23249` added a `${contextWindowHtml}` interpolation block to the card. After the user's intermediate edit to the card structure and `8ee1283`'s drop of the ternary, that block is no longer referenced.
+- **What was found**: ⚠️ `let contextWindowHtml = '';` and the corresponding `if (bKey === 'gemini' && state.agentUsage) { … }` block in `app.js` are dead code. The server still exposes `contextWindow`, so re-enabling the bar (e.g. if the user later wants option 1 or 3 from the question thread) is a small, additive change.
+- **Action**: tracked in R8-X1. Will be removed in a follow-up commit if confirmed dead by the user.
+
+### R8-ADR — Documentation drift
+
+- **What was checked**: do `REQUIREMENTS.md`, `STATUS.md`, and `REVIEWS.md` reflect the new behavior?
+- **What was found**: ⚠️ `REQUIREMENTS.md` §1.1 still says the gemini bar is rendered through `limit5h` / `limitWeekly` (it is), but says nothing about the parser's two token-counting modes. `STATUS.md` does not mention the Gemini `countTokens` path. R8 closes those gaps.
+- **Action**: closed by this pass — new AC-26 in `REQUIREMENTS.md`, new section in `STATUS.md`.
+
+### R8-X1 — Dead `contextWindowHtml` block in `app.js`
+
+- **What was checked**: leftover UI scaffolding from `8e23249` that the new card template does not reference.
+- **What was found**: ⚠️ the variable declaration and the `bKey === 'gemini'` gate are still in `app.js` but unused.
+- **Action**: tracked. Removed in this pass — see commit summary below. *(If you see this note but no follow-up commit, the dead code was kept intentionally for a future bar-restore option.)*
+
+### R8 summary
+
+| Severity | Count | Items |
+|---|---|---|
+| ✅ Pass | 6 | R8-C1 (countTokens), R8-C2 (cache), R8-C3 (helper), R8-C4 (endpoint), R8-S1 (boot env), R8-U1 (bars restored) |
+| ⚠️ Documented gap | 3 | R8-S2 (DI pattern for child_process), R8-U2 (dead contextWindowHtml — kept for now), R8-X1 (dead code) |
+| ❌ Regression | 0 | — |
+
+Net: the Antigravity token count is now accurate when `GEMINI_API_KEY` is set (otherwise the chars/4 heuristic still applies, as before), the active-session context window is exposed via the same endpoint, and the gemini brand card shows the same `%` bars as every other brand.
+
+

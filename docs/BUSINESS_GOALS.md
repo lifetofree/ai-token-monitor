@@ -23,6 +23,7 @@ A single developer (the project author) using multiple LLM Brands on one machine
 - Light/dark theme, per-user, with all inputs/dropdowns theme-aware
 - Local persistence of pricing, theme, and request history (with retention cap)
 - SSE-based real-time updates: new commands appear in the live feed within seconds of being logged to RTK
+- **Real token counting for Antigravity CLI**: when `GEMINI_API_KEY` is present in `.env`, the parser calls Gemini `countTokens` for each unique string and caches the result; falls back to the chars/4 heuristic when no key is configured or the API errors. Surfaces an active-session Context Window on the Antigravity brand card (size defaults to 1M tokens, overridable via `GEMINI_CONTEXT_WINDOW`).
 
 ## Out of scope (v1)
 
@@ -48,6 +49,8 @@ A single developer (the project author) using multiple LLM Brands on one machine
 8. The Brand `antigravity` does not appear anywhere in the UI
 9. Real RTK Monitor mode reads live commands from `~/Library/Application Support/rtk/history.db` and surfaces new ones within seconds via SSE
 10. Simulation mode generates synthetic traffic on an 8-20s schedule, and the mode switcher in the header is visible
+11. Real token counts on the Antigravity brand card: with `GEMINI_API_KEY` set, the numerator on the Antigravity card's bars is the exact Gemini countTokens figure for each unique string, not the chars/4 heuristic. (Off by ~15-30% on code-heavy prompts.)
+12. Active-session context window on the Antigravity brand card: a "Session Memory" bar shows what fraction of the model's 1M-token context window the active conversation is consuming. Hidden when no Antigravity conversation has been touched in the last 30 minutes.
 
 **Nice-to-haves (deferred, not promised):**
 
@@ -87,6 +90,7 @@ The dashboard is successful if its single user can answer these questions withou
 3. Am I approaching a self-imposed Rolling Spend Limit on any Brand?
 4. How much of my input traffic is being served from cache, in dollars and as a percentage?
 5. If I switch from Real to Simulation mode, does the dashboard re-render the synthetic stream?
+6. How much of my active Antigravity CLI session is consuming the model's 1M-token context window, and is the bar based on real token counts or a heuristic?
 
 A "no" to any of these is a v1 regression.
 

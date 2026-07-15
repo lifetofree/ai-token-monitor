@@ -10,6 +10,7 @@
   - `GET /api/env`, `POST /api/env`, `POST /api/env/key` — `.env` read/write (GET only ever returns the four provider keys, masked)
   - `GET /api/rtk`, `GET /api/rtk/summary`, `GET /api/rtk/stream`, `POST /api/rtk/ingest` — Real RTK Monitor (snapshot, summary, SSE, custom-project ingest from any project on this machine)
   - `GET /api/seed-quotas`, `POST /api/seed-quotas` — provider-quota cache
+  - `GET /api/agent-usage` — Antigravity CLI transcript aggregates (per-conversation totals across `total` / `5h` / `weekly` windows + active-session Context Window payload)
 - **Client**: vanilla ES2020 in the browser. No bundler, no transpiler, no framework. `app.js` (~1,450 lines) attaches one `DOMContentLoaded` handler and renders into pre-existing DOM nodes.
 - **Templating**: none. The HTML is a static `index.html`; dynamic content is built by `document.createElement` and `appendChild` (not `innerHTML` for untrusted data).
 - **CSS**: hand-written `styles.css` with CSS custom properties for the design system. No preprocessor, no utility framework, no component library.
@@ -27,12 +28,12 @@
 - **MiniMax Token Plan API**: `https://www.minimax.io/v1/token_plan/remains`, `GET` with `Authorization: Bearer <MINIMAX_API_KEY>`. Returns `model_remains` entries with `end_time` (5h), `weekly_end_time` (weekly), `current_interval_remaining_percent` (5h), `current_weekly_remaining_percent` (weekly). Implemented in `fetchMinimaxQuota()` with defensive field-name extraction and chat-model entry selection by name regex.
 - **Claude**: tracked purely via the local RTK database (no outbound call). The Anthropic API exposes only a per-minute token bucket via response headers, not a 5h/weekly window — and returns no headers at all when the account has insufficient credit. The dashboard derives Claude's cost, tokens, requests, and rolling-window resets from RTK, tagged `unit: 'local'`.
 - **GLM**: quota is read from response headers on a probe request (`x-ratelimit-remaining-requests` / `x-ratelimit-limit-requests`).
-- **Gemini**: no quota API; the fetcher returns `unit: "not_exposed"` and the dashboard falls back to local-spend view.
+- **Gemini**: no quota API; the fetcher returns `unit: "not_exposed"` and the dashboard falls back to local-spend view. The parser's `countTokensFor()` path, however, **does** use the Gemini `countTokens` API directly (see §1.4) when `GEMINI_API_KEY` is set — that is unrelated to the quota probe and only improves the **accuracy** of the token-count numerator on the brand card.
 - **Firebase Realtime Database** (ESP32 companion mirror): `lib/firebase.js` PUTs a sanitised snapshot to `<FIREBASE_URL>/display.json?auth=<FIREBASE_AUTH>` after every `seedBrandQuotas()` pass and on each new SSE-broadcast command. Uses the global `fetch` with an 8s `AbortSignal.timeout`. The ESP32 firmware (`firmware/esp32-display/esp32-display.ino`) polls this node on an ST7789 240×280 TFT. Enabled only when `FIREBASE_URL` (or `FIREBASE_DB_URL`) and `FIREBASE_AUTH` (or `FIREBASE_DB_SECRET`) are present; otherwise silently skipped. See ADR-0007.
 
 ### 1.4 Dependencies
 
-Zero runtime dependencies. `package.json` has no `dependencies` block. `devDependencies`: `vitest` (test runner).
+One runtime dependency (since R8): `@google/generative-ai` — used by `lib/antigravity-parser.js` to call Gemini `countTokens` for each unique string when `GEMINI_API_KEY` is present in `.env`. The dependency is lazy-`require`d inside `countTokensFor()` so cold-start cost when the key is absent is zero. `devDependencies`: `vitest` (test runner).
 
 The Node built-ins in use: `http`, `https` (`https.request` for the MiniMax fetcher; global `fetch` for Firebase), `fs`, `path`, `child_process` (`execFile` for the `sqlite3` reader; `exec` only to launch the browser at startup), `url`.
 
@@ -42,7 +43,8 @@ The system also depends on the **`sqlite3` CLI** being on `PATH` (not a Node dep
 
 - `npm run dev` → `node server.js`
 - `node --check server.js` and `node --check app.js` are run manually during feature work as a syntax gate. A future CI step should automate this (DevOps task).
-- No linter, no formatter, no type checker, no test runner. **Known gap**: a Vitest suite is the natural next step for the pure functions (cost, savings, cache rate, CSV builder, `computeApiUsedPct`, MiniMax response parsing).
+- `npm run check` — the project's own gate: `node --check server.js app.js && for f in lib/*.js; do node --check "$f"; done`. Wired into the CI workflow (`.github/workflows/ci.yml`).
+- **Vitest suite**: 20 files, 223 tests, ~530 ms. Covers pure functions (cost, savings, cache rate, CSV builder, `formatCurrency`, `escapeHtml`), brand detection (`detectBrand` across 10 fixture commands), env round-trip (AC-21), ingest validation/SQLi (AC-22..AC-25), mode switching (AC-12a/b), rolling-log filter (AC-16), reset-5h fallback, async parser stress, antigravity-context helper, and the parser's countTokens contract.
 
 ## 2. Coding standards
 
@@ -86,7 +88,7 @@ The system also depends on the **`sqlite3` CLI** being on `PATH` (not a Node dep
 ## 3. Branching & release
 
 - Two long-lived branches: `master` (release line) and `dev` (active feature work), both pushed to `origin`. The project is a personal tool; no `staging` / `release/*` split.
-- No tags, no versioned releases, no changelog file. `package.json` is pinned at `1.0.0`.
+- No tags, no versioned releases. A `CHANGELOG.md` was added in R8 (Po-owned; format loosely inspired by Keep a Changelog). `package.json` is pinned at `1.0.0`.
 - No pull-request workflow; the author commits directly to `master`/`dev`.
 
 ## 4. Security baseline
