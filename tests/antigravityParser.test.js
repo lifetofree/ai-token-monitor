@@ -1,7 +1,7 @@
 // tests/antigravityParser.test.js
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
-import { parseTranscriptFile, parseAllTranscripts, _setFs } from '../lib/antigravity-parser';
+import { parseTranscriptFile, parseAllTranscripts, countTokensFor, _setFs, _setGeminiKey, _setGeminiClient } from '../lib/antigravity-parser';
 
 // Create explicit mock functions
 const mockReaddir = vi.fn();
@@ -27,6 +27,8 @@ describe('Antigravity CLI Transcript Parser (Async)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _setFs(fs);
+    _setGeminiKey(null);
+    _setGeminiClient(null);
   });
 
   describe('parseTranscriptFile', () => {
@@ -212,6 +214,64 @@ describe('Antigravity CLI Transcript Parser (Async)', () => {
       const aggregated = await parseAllTranscripts();
       expect(aggregated.conversationsCount).toBe(0);
       expect(aggregated.sessions.length).toBe(0);
+    });
+  });
+
+  describe('countTokensFor (Gemini API path)', () => {
+    it('falls back to chars/4 heuristic when no key or client is set', async () => {
+      _setGeminiKey(null);
+      _setGeminiClient(null);
+      // 11 chars -> 3 tokens
+      const n = await countTokensFor('Hello agent');
+      expect(n).toBe(3);
+    });
+
+    it('uses injected Gemini client when one is set', async () => {
+      const mock = { countTokens: vi.fn(async (text) => 42) };
+      _setGeminiClient(mock);
+
+      const n = await countTokensFor('anything');
+      expect(n).toBe(42);
+      expect(mock.countTokens).toHaveBeenCalledWith('anything');
+    });
+
+    it('caches Gemini client responses by text', async () => {
+      const mock = { countTokens: vi.fn(async () => 7) };
+      _setGeminiClient(mock);
+
+      const a = await countTokensFor('repeat me');
+      const b = await countTokensFor('repeat me');
+      expect(a).toBe(7);
+      expect(b).toBe(7);
+      // Cache hit on second call — only one upstream request.
+      expect(mock.countTokens).toHaveBeenCalledTimes(1);
+    });
+
+    it('integrates real counts into parseTranscriptFile', async () => {
+      const mock = { countTokens: vi.fn(async (text) => 100) };
+      _setGeminiClient(mock);
+
+      mockReadFile.mockResolvedValue([
+        JSON.stringify({ source: 'USER_EXPLICIT', content: 'hi' }),
+        JSON.stringify({ source: 'MODEL', content: 'world' })
+      ].join('\n'));
+
+      const stats = await parseTranscriptFile('/path/to/mock/file.jsonl');
+      expect(stats.inputTokens).toBe(100);
+      expect(stats.outputTokens).toBe(100);
+      // 100 input * 1.25 + 100 output * 5.00 = 0.000625
+      expect(stats.totalCost).toBeCloseTo(0.000625, 6);
+    });
+
+    it('Gemini client errors fall back to heuristic per call (no cache poisoning)', async () => {
+      const mock = {
+        countTokens: vi.fn(async () => { throw new Error('429 quota'); })
+      };
+      _setGeminiClient(mock);
+
+      // 11 chars -> 3 tokens (heuristic), not thrown
+      const n = await countTokensFor('Hello agent');
+      expect(n).toBe(3);
     });
   });
 });

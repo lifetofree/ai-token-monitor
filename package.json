@@ -20,5 +20,8 @@
     "real-time"
   ],
   "author": "Antigravity",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1"
+  }
 }
