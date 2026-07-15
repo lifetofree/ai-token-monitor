@@ -498,23 +498,29 @@ function renderBrandCards(brandData) {
       ? `<span class="quota-error-indicator" style="color: var(--danger); cursor: help; margin-left: 6px; font-size: 14px;" title="${escapeHtml(errorTooltip)}">⚠️</span>`
       : '';
 
+    // Active-session context window: shown only on the Antigravity brand card
+    // (the gemini brand key, whose display name is "Antigravity" after the
+    // 0001-drop-antigravity-brand ADR). Source of truth is the parser's
+    // computeContextWindow() output via /api/agent-usage.
     let contextWindowHtml = '';
-    if (bKey === 'gemini' && state.agentUsage && state.agentUsage.contextWindow) {
+    if (bKey === 'gemini' && state.agentUsage) {
       const cw = state.agentUsage.contextWindow;
-      const sizeLabel = formatCompactNumber(cw.size);
-      contextWindowHtml = `
-        <!-- Active Session Context Window (Antigravity Only) -->
-        <div class="rolling-limit-row" style="margin-top: 8px; border-top: 1px dashed var(--border-color); padding-top: 8px;">
-          <div class="rolling-limit-row-header">
-            <span class="rolling-limit-title" style="color: var(--text-muted);">Session Memory</span>
-            <span class="rolling-limit-amounts">${cw.remaining}% remaining of ${sizeLabel}</span>
-            <span style="color: var(--text-muted); font-weight: 600; font-size: 11px;">${cw.used}% used</span>
+      if (cw) {
+        const sizeLabel = formatCompactNumber(cw.size);
+        contextWindowHtml = `
+          <!-- Active Session Context Window (Antigravity Only) -->
+          <div class="rolling-limit-row" style="margin-top: 8px; border-top: 1px dashed var(--border-color); padding-top: 8px;">
+            <div class="rolling-limit-row-header">
+              <span class="rolling-limit-title" style="color: var(--text-muted);">Session Memory</span>
+              <span class="rolling-limit-amounts">${cw.remaining}% remaining of ${sizeLabel}</span>
+              <span style="color: var(--text-muted); font-weight: 600; font-size: 11px;">${cw.usedPct}% used</span>
+            </div>
+            <div class="brand-limit-bar" title="Token memory consumed by the active Antigravity CLI conversation history in your terminal. Window size: ${sizeLabel} tokens (default 1M for Gemini 1.5 Pro/2.0 Flash/2.5 Pro; override via GEMINI_CONTEXT_WINDOW).">
+              <div class="brand-limit-fill" style="width: ${cw.usedPct}%;"></div>
+            </div>
           </div>
-          <div class="brand-limit-bar" title="Memory capacity consumed by the active chat conversation history in your terminal.">
-            <div class="brand-limit-fill" style="width: ${cw.used}%;"></div>
-          </div>
-        </div>
-      `;
+        `;
+      }
     }
 
     const card = document.createElement('div');
@@ -555,7 +561,6 @@ function renderBrandCards(brandData) {
           <span class="reset-badge${styleWeekly.class}" title="${escapeHtml(resetWeeklyTooltip)}">&#x23F1; ${resetWeeklyLabel}</span>
           ${forecastWeeklyLabel ? `<span class="forecast-badge" title="At current burn rate, weekly budget exhausted around ${forecastWeeklyLabel}">⚡ exhausted ~${forecastWeeklyLabel}</span>` : ''}
         </div>
-
         ${contextWindowHtml}
       </div>
     `;
