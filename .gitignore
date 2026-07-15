@@ -40,3 +40,6 @@ monitor.db
 *.db
 
 firmware/esp32-display/esp32-display copy.txt
+
+# Compiled native helper — built once at daemon startup from temp-sensor.c
+mac/temp-sensor

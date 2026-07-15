@@ -9,13 +9,22 @@ const { parseAllTranscripts } = require('./lib/antigravity-parser');
 const { BRAND_FETCHERS } = require('./lib/brand-fetchers');
 const { getRtkSpendMetrics } = require('./lib/rtk-metrics');
 const { detectBrand } = require('./lib/brand-detect');
-const { publishToFirebase } = require('./lib/firebase');
+const { publishToFirebase, publishMacToFirebase } = require('./lib/firebase');
 const { loadEnv, maskSecret, handleGetEnv, handlePostEnvKey, handlePostEnv } = require('./lib/env');
 const { DB_PATH, escapeSQLString, escapeSQLNumber, escapeSQLFloat, ensureBrandQuotaTable, readBrandQuotaRows, writeBrandQuotaRow, isCacheValid } = require('./lib/quota-cache');
 const { addSseClient, removeSseClient, broadcastToClients, initWatcher } = require('./lib/sse-watcher');
+const { ensureClaudeOtelTable, handleOtlpLogsPayload } = require('./lib/otel-usage');
 
 const PORT = 3838;
+// Default OTLP/HTTP port per the OpenTelemetry spec — matches what
+// OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 expects with no extra
+// configuration on the Claude Code side.
+const OTLP_PORT = 4318;
 const STATIC_ROOT = path.resolve(__dirname);
+
+// Last Mac metrics sample received from mac/mac-monitor.js — read back by
+// GET /api/mac for the web dashboard's Mac panel.
+let lastMacSnapshot = null;
 
 const MIME_TYPES = {
   '.html': 'text/html',
@@ -264,6 +273,87 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // API Endpoint: Ingest a sample from the Mac metrics daemon (mac/mac-monitor.js)
+  // and publish it directly to Firebase as /display/mac, a sibling of
+  // /display/quotas (wayfinder issues #5/#6/#7). No auth — loopback CORS is
+  // the trust boundary, same as /api/rtk/ingest. Unlike that endpoint, this
+  // one has exactly one client (our own daemon), so malformed payloads are
+  // hard-rejected (400) rather than coerced with defaults.
+  if (req.method === 'POST' && req.url === '/api/mac') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      let payload;
+      try {
+        payload = body.trim() ? JSON.parse(body) : {};
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      const REQUIRED_NUMERIC = ['ts', 'cpu', 'mem', 'net_down', 'net_up', 'batt_pct'];
+      for (const field of REQUIRED_NUMERIC) {
+        if (!Number.isFinite(payload[field])) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: `${field} is required and must be a finite number` }));
+          return;
+        }
+      }
+      if (typeof payload.batt_chg !== 'boolean') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'batt_chg is required and must be a boolean' }));
+        return;
+      }
+
+      const clampPct = (v) => Math.max(0, Math.min(100, v));
+      const clampNonNeg = (v) => Math.max(0, v);
+      const trimHist = (arr) => Array.isArray(arr) ? arr.filter(Number.isFinite).slice(-60) : [];
+
+      const macSnapshot = {
+        ts:       Math.round(payload.ts),
+        cpu:      clampPct(payload.cpu),
+        mem:      clampPct(payload.mem),
+        net_down: clampNonNeg(payload.net_down),
+        net_up:   clampNonNeg(payload.net_up),
+        batt_pct: clampPct(payload.batt_pct),
+        batt_chg: payload.batt_chg,
+        cpu_hist:      trimHist(payload.cpu_hist),
+        mem_hist:      trimHist(payload.mem_hist),
+        net_down_hist: trimHist(payload.net_down_hist),
+        net_up_hist:   trimHist(payload.net_up_hist),
+        batt_pct_hist: trimHist(payload.batt_pct_hist),
+      };
+      // temp/temp_hist stay optional — issue #5 found CPU temperature is
+      // usually unavailable without root or native compilation.
+      if (Number.isFinite(payload.temp)) macSnapshot.temp = payload.temp;
+      if (Array.isArray(payload.temp_hist)) {
+        const th = payload.temp_hist.filter(Number.isFinite).slice(-60);
+        if (th.length) macSnapshot.temp_hist = th;
+      }
+
+      lastMacSnapshot = macSnapshot;
+
+      const env = loadEnv(STATIC_ROOT);
+      publishMacToFirebase(macSnapshot, env).catch(e => console.error('[firebase mac]', e?.message));
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+    });
+    return;
+  }
+
+  // API Endpoint: Read the last Mac metrics sample received from the daemon
+  // (mac/mac-monitor.js), for the web dashboard's Mac panel to poll. Held
+  // in memory only — same source of truth as what got published to
+  // Firebase, just without a round-trip through Firebase for a same-machine
+  // consumer.
+  if (req.method === 'GET' && req.url === '/api/mac') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, mac: lastMacSnapshot }));
+    return;
+  }
+
   // API Endpoint: Get Current .env Configurations (masked)
   if (req.method === 'GET' && req.url === '/api/env') {
     handleGetEnv(req, res, STATIC_ROOT);
@@ -477,6 +567,38 @@ function triggerFirebaseUpdate(cmds) {
   }, 1000); // 1s debounce to prevent spamming during rapid requests
 }
 
+// OTLP/HTTP JSON receiver for Claude Code's native telemetry — ground-truth
+// per-request cost/token data from Claude Code's own accounting, as opposed
+// to RTK's reconstruction from parsed command output. Separate listener/port
+// since OTLP is its own wire protocol, not part of this app's REST API.
+// Always acks 200 regardless of parse outcome so the exporter never treats
+// an ingest-side problem as an export failure (and doesn't retry/backlog).
+const otlpServer = http.createServer((req, res) => {
+  if (req.method !== 'POST') {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+  let body = '';
+  req.on('data', chunk => { body += chunk; });
+  req.on('end', () => {
+    if (req.url === '/v1/logs') {
+      handleOtlpLogsPayload(body);
+    }
+    // /v1/metrics and anything else: ack only. The claude_code.api_request
+    // log record (via /v1/logs) already carries every field the dashboard
+    // needs — model, token breakdown, cost_usd, request_id — so there's no
+    // separate metrics-parsing path to maintain.
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{}');
+  });
+});
+
+otlpServer.listen(OTLP_PORT, '127.0.0.1', () => {
+  console.log(`OTLP receiver (Claude Code telemetry) on http://localhost:${OTLP_PORT}/`);
+  ensureClaudeOtelTable();
+});
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`AI Token Monitor running at http://localhost:${PORT}/`);
   initWatcher(DB_PATH, (cmds) => {
@@ -485,8 +607,10 @@ server.listen(PORT, '127.0.0.1', () => {
   ensureBrandQuotaTable();
   ensureBrandColumn();
   ensureAgentUsageTable();
-  syncAgentUsage();
-  setInterval(syncAgentUsage, 2 * 60 * 1000);
+  syncAgentUsage().catch(err => console.error('Initial agent usage sync failed:', err));
+  setInterval(() => {
+    syncAgentUsage().catch(err => console.error('Periodic agent usage sync failed:', err));
+  }, 2 * 60 * 1000);
   seedBrandQuotas(false).then(out => {
     console.log(`Brand-quota seed (${out.cached ? 'cached' : 'fetched'}): ${out.results.length} records`);
     publishToFirebase(out.results, out.env, out.rtkSpend).catch(e => console.error('[firebase]', e?.message));
@@ -543,35 +667,39 @@ function ensureAgentUsageTable() {
 // mtimeMs of each transcript file seen on the last sync — skip unchanged files.
 const _agentMtimeCache = new Map();
 
-function syncAgentUsage() {
-  const data = parseAllTranscripts();
-  if (!data || !data.sessions || data.sessions.length === 0) return;
+async function syncAgentUsage() {
+  try {
+    const data = await parseAllTranscripts();
+    if (!data || !data.sessions || data.sessions.length === 0) return;
 
-  let pendingQueries = 0;
-  data.sessions.forEach(session => {
-    if (_agentMtimeCache.get(session.conversationId) === session.lastModified) return;
+    let pendingQueries = 0;
+    data.sessions.forEach(session => {
+      if (_agentMtimeCache.get(session.conversationId) === session.lastModified) return;
 
-    pendingQueries++;
-    const query = `INSERT OR REPLACE INTO agent_usage (conversation_id, last_updated, input_tokens, output_tokens, cached_tokens, total_cost) VALUES (
-      ${escapeSQLString(session.conversationId)},
-      ${escapeSQLNumber(session.lastModified)},
-      ${escapeSQLNumber(session.inputTokens)},
-      ${escapeSQLNumber(session.outputTokens)},
-      ${escapeSQLNumber(session.cachedTokens)},
-      ${escapeSQLFloat(session.totalCost)}
-    );`;
-    execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
-      pendingQueries--;
-      if (error) {
-        console.error(`Failed to sync agent session ${session.conversationId}:`, error);
-      } else {
-        _agentMtimeCache.set(session.conversationId, session.lastModified);
-        if (pendingQueries === 0) {
-          triggerFirebaseUpdate();
+      pendingQueries++;
+      const query = `INSERT OR REPLACE INTO agent_usage (conversation_id, last_updated, input_tokens, output_tokens, cached_tokens, total_cost) VALUES (
+        ${escapeSQLString(session.conversationId)},
+        ${escapeSQLNumber(session.lastModified)},
+        ${escapeSQLNumber(session.inputTokens)},
+        ${escapeSQLNumber(session.outputTokens)},
+        ${escapeSQLNumber(session.cachedTokens)},
+        ${escapeSQLFloat(session.totalCost)}
+      );`;
+      execFile('sqlite3', ['-cmd', '.timeout 5000', DB_PATH, query], (error) => {
+        pendingQueries--;
+        if (error) {
+          console.error(`Failed to sync agent session ${session.conversationId}:`, error);
+        } else {
+          _agentMtimeCache.set(session.conversationId, session.lastModified);
+          if (pendingQueries === 0) {
+            triggerFirebaseUpdate();
+          }
         }
-      }
+      });
     });
-  });
+  } catch (error) {
+    console.error('Error in syncAgentUsage:', error);
+  }
 }
 
 async function seedBrandQuotas(force) {
@@ -608,9 +736,14 @@ async function seedBrandQuotas(force) {
       if (typeof rawJson === 'string') {
         try { rawJson = JSON.parse(rawJson); } catch (e) { rawJson = null; }
       }
-      const updatedRawJson = brandRtk
-        ? Object.assign({}, rawJson, { _rtk_spend: brandRtk })
-        : rawJson;
+      // 'local' units (Claude): raw_json IS the spend object itself — there's
+      // no separate provider API response to preserve, so replace it wholesale
+      // with the fresh value instead of nesting a redundant _rtk_spend copy
+      // on top of a stale base (which is what the branch below does for
+      // brands whose raw_json is a real API response, e.g. GLM).
+      const updatedRawJson = prev.unit === 'local'
+        ? (brandRtk || rawJson)
+        : (brandRtk ? Object.assign({}, rawJson, { _rtk_spend: brandRtk }) : rawJson);
 
       row = Object.assign({}, prev, { raw_json: updatedRawJson });
     } else if (!apiKey) {

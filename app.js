@@ -142,7 +142,15 @@ function initElements() {
     tokenGlm: document.getElementById('token-glm'),
     tokenMinimax: document.getElementById('token-minimax'),
     projectsSection: document.getElementById('projects-section'),
-    projectsTableContainer: document.getElementById('projects-table-container')
+    projectsTableContainer: document.getElementById('projects-table-container'),
+
+    // Mac System panel
+    valMacCpu: document.getElementById('val-mac-cpu'),
+    valMacMem: document.getElementById('val-mac-mem'),
+    valMacTemp: document.getElementById('val-mac-temp'),
+    valMacBatt: document.getElementById('val-mac-batt'),
+    valMacNet: document.getElementById('val-mac-net'),
+    macStatusDot: document.getElementById('mac-status-dot')
   };
 }
 
@@ -170,6 +178,8 @@ function init() {
   fetchBrandQuotas();
   fetchAgentUsage();
   fetchProjectData();
+  fetchMacMetrics();
+  setInterval(fetchMacMetrics, 3000);
 
   // Start countdown loops
   startCountdownTimer();
@@ -1102,6 +1112,49 @@ function fetchAPIKeys() {
       if (data.MINIMAX_API_KEY && elements.tokenMinimax) elements.tokenMinimax.value = data.MINIMAX_API_KEY;
     })
     .catch(err => console.error('Failed to load local API keys from backend:', err));
+}
+
+// Mac System panel: polls the server's in-memory last sample from
+// mac/mac-monitor.js (issues #5/#6/#7). No explicit online/stale flag —
+// staleness is derived client-side from `ts` vs Date.now(), same 10s
+// threshold and same reasoning as the ESP32 firmware (issue #6).
+const MAC_STALE_THRESHOLD_SEC = 10;
+
+function fetchMacMetrics() {
+  fetch('/api/mac')
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      if (data.success) renderMacPanel(data.mac);
+    })
+    .catch(err => {
+      console.warn('Failed to fetch Mac metrics:', err);
+    });
+}
+
+function renderMacPanel(mac) {
+  if (!elements.valMacCpu) return;
+
+  if (!mac) {
+    elements.valMacCpu.textContent = '--%';
+    elements.valMacMem.textContent = '--%';
+    elements.valMacTemp.textContent = '--°C';
+    elements.valMacBatt.textContent = '--%';
+    elements.valMacNet.textContent = 'net -- / -- KB/s';
+    if (elements.macStatusDot) elements.macStatusDot.className = 'status-indicator offline';
+    return;
+  }
+
+  const online = (Date.now() / 1000 - mac.ts) < MAC_STALE_THRESHOLD_SEC;
+
+  elements.valMacCpu.textContent = `${Math.round(mac.cpu)}%`;
+  elements.valMacMem.textContent = `${Math.round(mac.mem)}%`;
+  elements.valMacTemp.textContent = (typeof mac.temp === 'number') ? `${mac.temp.toFixed(1)}°C` : 'N/A';
+  elements.valMacBatt.textContent = `${Math.round(mac.batt_pct)}%${mac.batt_chg ? ' ⚡' : ''}`;
+  elements.valMacNet.textContent = `net ↓${mac.net_down} ↑${mac.net_up} KB/s`;
+  if (elements.macStatusDot) elements.macStatusDot.className = online ? 'status-indicator' : 'status-indicator offline';
 }
 
 function fetchBrandQuotas() {

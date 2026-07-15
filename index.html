@@ -85,6 +85,30 @@
         </div>
       </section>
 
+      <!-- Mac System Metrics (from mac/mac-monitor.js via GET /api/mac) -->
+      <section class="stats-grid" id="mac-section" style="margin-top: 24px;" aria-label="Mac System Metrics">
+        <div class="card" id="stat-mac-cpu">
+          <div class="stat-card-title">Mac CPU</div>
+          <div class="stat-card-value" id="val-mac-cpu">--%</div>
+        </div>
+        <div class="card" id="stat-mac-mem">
+          <div class="stat-card-title">Mac Memory</div>
+          <div class="stat-card-value" id="val-mac-mem">--%</div>
+        </div>
+        <div class="card" id="stat-mac-temp">
+          <div class="stat-card-title">Mac CPU Temp</div>
+          <div class="stat-card-value" id="val-mac-temp">--&deg;C</div>
+        </div>
+        <div class="card" id="stat-mac-batt">
+          <div class="stat-card-title">Mac Battery</div>
+          <div class="stat-card-value" id="val-mac-batt">--%</div>
+          <div class="stat-card-sub">
+            <span class="status-indicator" id="mac-status-dot"></span>
+            <span id="val-mac-net">net -- / -- KB/s</span>
+          </div>
+        </div>
+      </section>
+
       <!-- Middle Grid: Brand Cards -->
       <section class="brands-section" style="margin-top: 24px;" aria-label="Brand Performance">
         <!-- Individual Brands Cost Cards -->

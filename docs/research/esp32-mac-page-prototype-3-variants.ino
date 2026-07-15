@@ -107,34 +107,12 @@ bool dataFetched = false;           // true after first successful Firebase fetc
 bool wifiEverConnected = false;     // true once we've connected at least once
 
 // ─── Display State (which screen is shown) ───────────────────────────
-enum DisplayState { STATE_OVERVIEW, STATE_SETTINGS, STATE_MAC };
+enum DisplayState { STATE_OVERVIEW, STATE_SETTINGS, STATE_MAC_PROTO };
 int displayState = STATE_OVERVIEW;
 
-// ─── Mac System page (issue #10): data model fed by GET /display/mac ─
-// Layout is the card-grid style chosen from the issue #8 prototype (saved
-// at docs/research/esp32-mac-page-prototype-3-variants.ino for reference).
-#define MAC_HISTORY_N 60
-struct MacMetric {
-  float current;
-  float history[MAC_HISTORY_N];
-  int historyLen;
-};
-struct MacData {
-  bool online;       // derived client-side: |now - ts| < 10s (issues #6/#7 — no explicit flag)
-  long long ts;       // unix seconds, from the daemon (mac/mac-monitor.js)
-  MacMetric cpu;
-  MacMetric mem;
-  MacMetric net_down;
-  MacMetric net_up;
-  MacMetric batt_pct;
-  bool batt_chg;
-  bool hasTemp;       // issue #5: CPU temp is omitted from the payload if unavailable
-  MacMetric temp;
-};
-MacData macData;
-bool macDataFetched = false;
-unsigned long lastMacFetch = 0;
-const unsigned long MAC_FETCH_INTERVAL_MS = 2000;
+// ─── PROTOTYPE (issue #8, throwaway): Mac page mock-up state ─────────
+int macProtoVariant = 0;          // 0=A rows, 1=B cards, 2=C hero+strip
+bool macProtoOfflineSim = false;  // fake "Mac offline" toggle for review
 
 // ─── Settings (persisted in RAM only; re-applied on boot) ───────────
 int brightnessLevel = 3;  // 0..3 -> 25 / 50 / 75 / 100 %
@@ -918,111 +896,83 @@ void handleWiFiAutoReconnect() {
 }
 
 // =====================================================================
-// 🖥️ Mac System page (issue #10) — fetch, parse, and render real data
-// from GET /display/mac (issues #5/#6/#7). Card-grid layout is the
-// variant chosen from the issue #8 prototype (docs/research/
-// esp32-mac-page-prototype-3-variants.ino has the other two for reference).
+// 🧪 PROTOTYPE (issue #8, throwaway — do NOT build the real Mac page on
+// this struct/API; #10 defines the actual data model). Three structurally
+// different mock layouts for the Mac System page, rendered from hardcoded
+// fake data so the visual design can be judged on real hardware before the
+// real data flow (#5/#6/#7) exists.
+//
+// Reachable from Overview: tap the footer to enter. While on this page:
+//   tap header (top)  = back to Overview
+//   tap footer (bottom) = cycle variant A -> B -> C
+//   tap body (middle)  = toggle a fake "Mac offline" preview
+// Once a variant is picked, delete this whole block + its two touch hooks
+// in handleTap()/renderCurrent() and replace with the real page (#10).
 // =====================================================================
 
-void parseMacHistoryArray(FirebaseJson &json, const char* path, MacMetric &metric) {
-  metric.historyLen = 0;
+#define MAC_PROTO_N       60
+#define MAC_PROTO_METRICS 6
+// index: 0=cpu 1=mem 2=net_down 3=net_up 4=temp 5=batt
+float macProtoHist[MAC_PROTO_METRICS][MAC_PROTO_N];
+bool  macProtoDataReady = false;
 
-  // FirebaseJson::get() only accepts a FirebaseJsonData& — an array at a
-  // path is reached indirectly via FirebaseJsonData::getArray().
-  FirebaseJsonData pathData;
-  if (!json.get(pathData, path)) return;
-  FirebaseJsonArray arr;
-  if (!pathData.getArray(arr)) return;
+const char* macProtoLabel[MAC_PROTO_METRICS] = { "CPU", "MEM", "NET DN", "NET UP", "TEMP", "BATT" };
+const char* macProtoUnit[MAC_PROTO_METRICS]  = { "%", "%", "KB/s", "KB/s", "C", "%" };
 
-  int n = arr.size();
-  if (n > MAC_HISTORY_N) n = MAC_HISTORY_N;
-  for (int i = 0; i < n; i++) {
-    FirebaseJsonData d;
-    if (arr.get(d, i)) metric.history[i] = d.doubleValue;
+void macProtoGenerateFakeData() {
+  // Hardcoded, deliberately varied waveforms per metric — not realistic,
+  // just distinct enough that each variant has something to render, and
+  // each crosses its own "bad" threshold near the end so the value/sparkline
+  // color-coding is visible on the current sample too.
+  for (int i = 0; i < MAC_PROTO_N; i++) {
+    float t = (float)i;
+    float cpu = 45 + 20 * sinf(t * 0.21f) + 8 * sinf(t * 0.9f);
+    if (i > 50) cpu += (i - 50) * 5;                                       // late spike -> red
+    if (cpu > 100) cpu = 100;
+    macProtoHist[0][i] = cpu;
+    macProtoHist[1][i] = 68 + 10 * sinf(t * 0.08f);                        // mem: slow drift
+    macProtoHist[2][i] = 60 + 180 * fabsf(sinf(t * 0.5f)) * (((i / 5) % 3 == 0) ? 1.4f : 0.3f); // net down: bursty
+    macProtoHist[3][i] = 20 + 60 * fabsf(sinf(t * 0.7f + 1.0f));           // net up: smaller bursts
+    macProtoHist[4][i] = 68 + 14 * sinf(t * 0.15f + 2.0f);                 // temp: crosses threshold sometimes
+    macProtoHist[5][i] = 30.0f - i * 0.28f;                                // batt: slow drain into red
   }
-  metric.historyLen = n;
+  macProtoDataReady = true;
 }
 
-void fetchMacData() {
-  if (!useFirebase) return;
-
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-
-  String url = String("https://") + FIREBASE_HOST + "/display/mac.json?auth=" + FIREBASE_AUTH;
-  http.begin(client, url);
-  http.setTimeout(5000);
-
-  int httpCode = http.GET();
-  if (httpCode == 404) {
-    Serial.println("[MAC] 404 — daemon hasn't published yet");
-    http.end();
-    return;
-  }
-  if (httpCode != 200) {
-    Serial.printf("[MAC] HTTP %d\n", httpCode);
-    http.end();
-    return;
-  }
-
-  String body = http.getString();
-  http.end();
-
-  FirebaseJson json;
-  if (!json.setJsonData(body)) {
-    Serial.println("[MAC] Failed to parse JSON");
-    return;
-  }
-
-  macData.ts = getJsonInt64(json, "ts");
-
-  FirebaseJsonData d;
-  if (json.get(d, "cpu"))      macData.cpu.current      = d.doubleValue;
-  if (json.get(d, "mem"))      macData.mem.current       = d.doubleValue;
-  if (json.get(d, "net_down")) macData.net_down.current  = d.doubleValue;
-  if (json.get(d, "net_up"))   macData.net_up.current    = d.doubleValue;
-  if (json.get(d, "batt_pct")) macData.batt_pct.current  = d.doubleValue;
-  if (json.get(d, "batt_chg")) macData.batt_chg          = d.boolValue;
-
-  macData.hasTemp = json.get(d, "temp");
-  if (macData.hasTemp) macData.temp.current = d.doubleValue;
-
-  parseMacHistoryArray(json, "cpu_hist", macData.cpu);
-  parseMacHistoryArray(json, "mem_hist", macData.mem);
-  parseMacHistoryArray(json, "net_down_hist", macData.net_down);
-  parseMacHistoryArray(json, "net_up_hist", macData.net_up);
-  parseMacHistoryArray(json, "batt_pct_hist", macData.batt_pct);
-  if (macData.hasTemp) parseMacHistoryArray(json, "temp_hist", macData.temp);
-
-  time_t ntp = time(nullptr);
-  long long driftSec = (ntp > 1000000000L) ? ((long long)ntp - macData.ts) : 9999;
-  macData.online = (driftSec > -10 && driftSec < 10);
-
-  macDataFetched = true;
-  Serial.println("[MAC] Data updated");
-}
-
-uint16_t macValueColor(int fieldIndex, float v) {
-  switch (fieldIndex) {
+uint16_t macProtoValueColor(int m, float v) {
+  // Threshold coloring mirrors getBarColorForPct's spirit — red when a
+  // metric is in a "bad" state. Battery is inverted (low is bad, not high).
+  switch (m) {
     case 0: return v > 85 ? COLOR_NET_FAIL : COLOR_WHITE;   // cpu
     case 1: return v > 90 ? COLOR_NET_FAIL : COLOR_WHITE;   // mem
-    case 4: return v < 20 ? COLOR_NET_FAIL : COLOR_WHITE;   // batt_pct
-    case 5: return v > 75 ? COLOR_NET_FAIL : COLOR_WHITE;   // temp
+    case 4: return v > 75 ? COLOR_NET_FAIL : COLOR_WHITE;   // temp
+    case 5: return v < 20 ? COLOR_NET_FAIL : COLOR_WHITE;   // batt
     default: return COLOR_WHITE;                             // network
   }
 }
 
-String macValueStr(int fieldIndex, float v, bool available) {
-  if (!available) return String("N/A");
+String macProtoValueStr(int m, float v) {
   char buf[16];
-  const char* unit = (fieldIndex == 2 || fieldIndex == 3) ? "KB/s" : (fieldIndex == 5 ? "C" : "%");
-  sprintf(buf, "%d%s", (int)roundf(v), unit);
+  sprintf(buf, "%d%s", (int)roundf(v), macProtoUnit[m]);
   return String(buf);
 }
 
-void drawMacSparkBars(int x, int y, int w, int h, float* hist, int n, uint16_t color) {
-  if (n < 2) return;
+// ── Sparkline style 1: thin polyline (Variant A) ──────────────────────
+void macProtoSparkLine(int x, int y, int w, int h, float* hist, int n, uint16_t color) {
+  float mn = hist[0], mx = hist[0];
+  for (int i = 1; i < n; i++) { if (hist[i] < mn) mn = hist[i]; if (hist[i] > mx) mx = hist[i]; }
+  float range = (mx - mn) < 1 ? 1 : (mx - mn);
+  int prevX = x, prevY = y + h - (int)((hist[0] - mn) / range * h);
+  for (int i = 1; i < n; i++) {
+    int cx = x + (i * w) / (n - 1);
+    int cy = y + h - (int)((hist[i] - mn) / range * h);
+    gfx->drawLine(prevX, prevY, cx, cy, color);
+    prevX = cx; prevY = cy;
+  }
+}
+
+// ── Sparkline style 2: downsampled bar chart (Variant B) ───────────────
+void macProtoSparkBars(int x, int y, int w, int h, float* hist, int n, uint16_t color) {
   int bars = w / 5; if (bars < 4) bars = 4; if (bars > n) bars = n;
   int perBar = n / bars;
   float mn = hist[0], mx = hist[0];
@@ -1040,7 +990,38 @@ void drawMacSparkBars(int x, int y, int w, int h, float* hist, int n, uint16_t c
   }
 }
 
-void drawMacOfflineBanner() {
+// ── Sparkline style 3: filled area under a polyline (Variant C hero) ───
+void macProtoSparkArea(int x, int y, int w, int h, float* hist, int n, uint16_t fillColor, uint16_t lineColor) {
+  float mn = hist[0], mx = hist[0];
+  for (int i = 1; i < n; i++) { if (hist[i] < mn) mn = hist[i]; if (hist[i] > mx) mx = hist[i]; }
+  float range = (mx - mn) < 1 ? 1 : (mx - mn);
+  for (int i = 0; i < n; i++) {
+    int cx = x + (i * w) / (n - 1);
+    int cy = y + h - (int)((hist[i] - mn) / range * h);
+    gfx->drawLine(cx, cy, cx, y + h, fillColor);   // fill column down to baseline
+  }
+  for (int i = 1; i < n; i++) {
+    int px = x + ((i - 1) * w) / (n - 1);
+    int py = y + h - (int)((hist[i - 1] - mn) / range * h);
+    int cx = x + (i * w) / (n - 1);
+    int cy = y + h - (int)((hist[i] - mn) / range * h);
+    gfx->drawLine(px, py, cx, cy, lineColor);
+  }
+}
+
+void macProtoDrawChrome(const char* variantName) {
+  drawHeader();
+  gfx->fillRect(0, FOOTER_Y, SCREEN_WIDTH, FOOTER_H, COLOR_CARD_BG);
+  gfx->drawFastHLine(0, FOOTER_Y, SCREEN_WIDTH, COLOR_BORDER);
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(12, FOOTER_Y + 12);
+  gfx->print("tap top: back | tap bottom: ");
+  gfx->print(variantName);
+  gfx->print(" | tap middle: offline");
+}
+
+void macProtoDrawOfflineBanner() {
   int bw = 220, bh = 50;
   int bx = (SCREEN_WIDTH - bw) / 2, by = (SCREEN_HEIGHT - bh) / 2;
   gfx->fillRoundRect(bx, by, bw, bh, CARD_R, COLOR_CARD_BG);
@@ -1051,37 +1032,56 @@ void drawMacOfflineBanner() {
   gfx->print("MAC OFFLINE");
 }
 
-void drawMacScreen() {
+// ── Variant A: uniform row list, thin polyline sparklines ──────────────
+// NOTE: the issue's assumed "5 rows of 60px" does not fit the real usable
+// content area (header ends at y=36, footer starts at y=290 -> only 248px
+// tall). This variant uses 6 rows (battery gets its own row rather than a
+// bottom overlay) at ~38px each to actually fit.
+void macProtoDrawVariantA() {
   gfx->fillScreen(COLOR_DARK_BG);
-  drawHeader();
-  gfx->fillRect(0, FOOTER_Y, SCREEN_WIDTH, FOOTER_H, COLOR_CARD_BG);
-  gfx->drawFastHLine(0, FOOTER_Y, SCREEN_WIDTH, COLOR_BORDER);
-  gfx->setTextSize(1);
-  gfx->setTextColor(COLOR_TXT_MUTED);
-  gfx->setCursor(12, FOOTER_Y + 12);
-  gfx->print("tap top: overview");
+  macProtoDrawChrome("A: rows");
+  int y0 = CARD_Y_START;
+  int rowH = 38, gap = 3;
+  int labelW = 62, valueW = 70;
+  int sparkX = CARD_X_START + labelW;
+  int sparkW = SCREEN_WIDTH - CARD_X_START * 2 - labelW - valueW;
+  for (int m = 0; m < MAC_PROTO_METRICS; m++) {
+    int y = y0 + m * (rowH + gap);
+    float cur = macProtoHist[m][MAC_PROTO_N - 1];
+    uint16_t color = macProtoValueColor(m, cur);
 
-  if (!macDataFetched) {
-    gfx->setTextSize(2);
+    gfx->fillRoundRect(CARD_X_START, y, SCREEN_WIDTH - CARD_X_START * 2, rowH, 6, COLOR_CARD_BG);
+    gfx->setTextSize(1);
     gfx->setTextColor(COLOR_TXT_MUTED);
-    gfx->setCursor(140, 150);
-    gfx->print("Waiting for data...");
-    gfx->flush();
-    return;
+    gfx->setCursor(CARD_X_START + 8, y + (rowH - 8) / 2);
+    gfx->print(macProtoLabel[m]);
+
+    macProtoSparkLine(sparkX, y + 6, sparkW, rowH - 12, macProtoHist[m], MAC_PROTO_N, COLOR_NET_OK);
+
+    String vs = macProtoValueStr(m, cur);
+    gfx->setTextSize(2);
+    gfx->setTextColor(color);
+    int vw = vs.length() * CHAR_W_SIZE2;
+    gfx->setCursor(SCREEN_WIDTH - CARD_X_START - 8 - vw, y + (rowH - 16) / 2);
+    gfx->print(vs);
   }
+  if (macProtoOfflineSim) macProtoDrawOfflineBanner();
+  gfx->flush();
+}
 
-  const char* labels[6]  = { "CPU", "MEM", "NET DN", "NET UP", "BATT", "TEMP" };
-  MacMetric* metrics[6]  = { &macData.cpu, &macData.mem, &macData.net_down, &macData.net_up, &macData.batt_pct, &macData.temp };
-  bool available[6]      = { true, true, true, true, true, macData.hasTemp };
-
+// ── Variant B: 2x3 card grid, downsampled bar sparklines ────────────────
+// Matches the existing brand-card visual language (fillRoundRect + border).
+void macProtoDrawVariantB() {
+  gfx->fillScreen(COLOR_DARK_BG);
+  macProtoDrawChrome("B: cards");
   int y0 = CARD_Y_START;
   int cardW = 230, cardH = 80, gap = 4;
-  for (int m = 0; m < 6; m++) {
+  for (int m = 0; m < MAC_PROTO_METRICS; m++) {
     int row = m / 2, col = m % 2;
     int x = CARD_X_START + col * (cardW + gap);
     int y = y0 + row * (cardH + gap);
-    float cur = metrics[m]->current;
-    uint16_t color = available[m] ? macValueColor(m, cur) : COLOR_TXT_MUTED;
+    float cur = macProtoHist[m][MAC_PROTO_N - 1];
+    uint16_t color = macProtoValueColor(m, cur);
 
     gfx->fillRoundRect(x, y, cardW, cardH, CARD_R, COLOR_CARD_BG);
     gfx->drawRoundRect(x, y, cardW, cardH, CARD_R, COLOR_BORDER);
@@ -1089,29 +1089,73 @@ void drawMacScreen() {
     gfx->setTextSize(1);
     gfx->setTextColor(COLOR_TXT_MUTED);
     gfx->setCursor(x + 12, y + 8);
-    gfx->print(labels[m]);
+    gfx->print(macProtoLabel[m]);
 
-    String vs = macValueStr(m, cur, available[m]);
+    String vs = macProtoValueStr(m, cur);
     gfx->setTextSize(2);
     gfx->setTextColor(color);
     int vw = vs.length() * CHAR_W_SIZE2;
     gfx->setCursor(x + cardW - 12 - vw, y + 6);
     gfx->print(vs);
 
-    if (available[m] && metrics[m]->historyLen >= 2) {
-      drawMacSparkBars(x + 10, y + 32, cardW - 20, cardH - 42, metrics[m]->history, metrics[m]->historyLen, COLOR_NET_OK);
-    }
+    macProtoSparkBars(x + 10, y + 32, cardW - 20, cardH - 42, macProtoHist[m], MAC_PROTO_N, COLOR_NET_OK);
   }
-
-  if (macData.batt_chg) {
-    gfx->setTextSize(1);
-    gfx->setTextColor(BRAND_GLM);
-    gfx->setCursor(CARD_X_START, FOOTER_Y - 14);
-    gfx->print("charging");
-  }
-
-  if (!macData.online) drawMacOfflineBanner();
+  if (macProtoOfflineSim) macProtoDrawOfflineBanner();
   gfx->flush();
+}
+
+// ── Variant C: hero metric (CPU) + compact strip for the rest ──────────
+// Asymmetric information hierarchy, unlike A/B's uniform treatment.
+void macProtoDrawVariantC() {
+  gfx->fillScreen(COLOR_DARK_BG);
+  macProtoDrawChrome("C: hero");
+  int y0 = CARD_Y_START;
+  int heroH = 112;
+  int fullW = SCREEN_WIDTH - CARD_X_START * 2;
+
+  gfx->fillRoundRect(CARD_X_START, y0, fullW, heroH, CARD_R, COLOR_CARD_BG);
+  gfx->drawRoundRect(CARD_X_START, y0, fullW, heroH, CARD_R, COLOR_BORDER);
+  macProtoSparkArea(CARD_X_START + 10, y0 + 10, fullW - 20, heroH - 20,
+                    macProtoHist[0], MAC_PROTO_N, COLOR_BORDER, COLOR_NET_OK);
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TXT_MUTED);
+  gfx->setCursor(CARD_X_START + 16, y0 + 10);
+  gfx->print("CPU");
+  String heroVs = macProtoValueStr(0, macProtoHist[0][MAC_PROTO_N - 1]);
+  gfx->setTextSize(4);
+  gfx->setTextColor(macProtoValueColor(0, macProtoHist[0][MAC_PROTO_N - 1]));
+  gfx->setCursor(CARD_X_START + 16, y0 + 30);
+  gfx->print(heroVs);
+
+  int stripY = y0 + heroH + 6;
+  int stripH = FOOTER_Y - stripY;
+  int tileW = 89, tileGap = 4;
+  int tx = CARD_X_START;
+  for (int m = 1; m < MAC_PROTO_METRICS; m++) {
+    float cur = macProtoHist[m][MAC_PROTO_N - 1];
+    uint16_t color = macProtoValueColor(m, cur);
+    gfx->fillRoundRect(tx, stripY, tileW, stripH, 6, COLOR_CARD_BG);
+    gfx->setTextSize(1);
+    gfx->setTextColor(COLOR_TXT_MUTED);
+    gfx->setCursor(tx + 6, stripY + 6);
+    gfx->print(macProtoLabel[m]);
+    gfx->setTextColor(color);
+    gfx->setCursor(tx + 6, stripY + 18);
+    gfx->print(macProtoValueStr(m, cur));
+    macProtoSparkLine(tx + 4, stripY + stripH - 22, tileW - 8, 18, macProtoHist[m], MAC_PROTO_N, COLOR_NET_OK);
+    tx += tileW + tileGap;
+  }
+  if (macProtoOfflineSim) macProtoDrawOfflineBanner();
+  gfx->flush();
+}
+
+void drawMacPagePrototype() {
+  if (!macProtoDataReady) macProtoGenerateFakeData();
+  switch (macProtoVariant) {
+    case 0: macProtoDrawVariantA(); break;
+    case 1: macProtoDrawVariantB(); break;
+    default: macProtoDrawVariantC(); break;
+  }
 }
 
 // =====================================================================
@@ -1129,8 +1173,8 @@ void renderCurrent() {
   }
   if (displayState == STATE_OVERVIEW) {
     drawOverviewScreen();
-  } else if (displayState == STATE_MAC) {
-    drawMacScreen();
+  } else if (displayState == STATE_MAC_PROTO) {
+    drawMacPagePrototype();  // PROTOTYPE (issue #8)
   } else {
     drawSettingsScreen();
   }
@@ -1298,14 +1342,16 @@ void handleTap(int x, int y) {
   if (now - lastTapTime < TAP_DEBOUNCE_MS) return;
   lastTapTime = now;
 
-  // Mac page: tap header to go back. (Swipe navigation between all three
-  // pages is issue #9, not yet resolved — footer-tap is a placeholder entry
-  // point until that lands.)
-  if (displayState == STATE_MAC) {
+  // PROTOTYPE (issue #8): the Mac page mock owns its own tap zones while active.
+  if (displayState == STATE_MAC_PROTO) {
     if (y < HEADER_TAP_H) {
       displayState = STATE_OVERVIEW;
-      renderCurrent();
+    } else if (y > SCREEN_HEIGHT - FOOTER_H) {
+      macProtoVariant = (macProtoVariant + 1) % 3;
+    } else {
+      macProtoOfflineSim = !macProtoOfflineSim;
     }
+    renderCurrent();
     return;
   }
 
@@ -1316,11 +1362,9 @@ void handleTap(int x, int y) {
     return;
   }
   if (y > SCREEN_HEIGHT - FOOTER_H) {
-    // Footer tap from Overview enters the Mac page (placeholder for #9's swipe nav)
+    // PROTOTYPE (issue #8): footer tap from Overview enters the Mac page mock
     if (displayState == STATE_OVERVIEW) {
-      displayState = STATE_MAC;
-      lastMacFetch = 0; // force an immediate fetch instead of waiting up to 2s
-      fetchMacData();
+      displayState = STATE_MAC_PROTO;
       renderCurrent();
     }
     return; // footer is hint-only otherwise
@@ -1430,13 +1474,6 @@ void loop() {
     if (dataFetched && (clockText != prevClock || dateText != prevDate)) {
       renderCurrent();
     }
-  }
-
-  // ─── Mac page refresh (every 2s, only while that page is showing) ──
-  if (displayState == STATE_MAC && now - lastMacFetch >= MAC_FETCH_INTERVAL_MS) {
-    lastMacFetch = now;
-    fetchMacData();
-    renderCurrent();
   }
 
   // ─── Cloud Refresh (every 30s) ─────────────────────────────────────
