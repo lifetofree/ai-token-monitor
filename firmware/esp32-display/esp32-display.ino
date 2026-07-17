@@ -30,11 +30,12 @@
 #endif
 
 // ─── Pin config ────────────────────────────────────────────────────────────────
+#define TFT_MISO  12
 #define TFT_MOSI  13
 #define TFT_CLK   14
 #define TFT_CS    15
 #define TFT_DC    2
-#define TFT_RST   -1   // tied to ESP32 EN
+#define TFT_RST   4    // reset pin on standard ESP32-2432S028R
 #define TFT_BL    21   // active HIGH on standard ESP32-2432S028R (GPIO 21)
 
 #if USE_TOUCH
@@ -50,7 +51,7 @@
 
 // ─── Display ───────────────────────────────────────────────────────────────────
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_CLK, TFT_MOSI,
-                                            GFX_NOT_DEFINED, VSPI);
+                                            TFT_MISO, HSPI);
 Arduino_GFX   *gfx  = new Arduino_ILI9341(bus, TFT_RST, 0 /*rot*/, false,
                                            240, 320);
 
@@ -409,8 +410,8 @@ void setup() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, LOW);
 
-  // Init display at conservative 4 MHz (yellow-PCB clones can be flaky at 20 MHz)
-  if (!gfx->begin(4000000)) {
+  // Init display at standard 20 MHz (using HSPI native pins)
+  if (!gfx->begin(20000000)) {
     Serial.println("[ERROR] gfx->begin() failed — check wiring");
   }
   gfx->setRotation(1);  // landscape 320×240
