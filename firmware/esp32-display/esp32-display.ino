@@ -406,9 +406,11 @@ void setup() {
   delay(800);
   Serial.println("\n=== AI Token Monitor — ESP32-2432S028R ===");
 
-  // Backlight off during init (avoid flash)
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);  // HIGH = OFF
+  // Backlight off during init (avoid flash) - support both Pin 21 (active-LOW) and Pin 22 (active-HIGH)
+  pinMode(21, OUTPUT);
+  digitalWrite(21, HIGH); // Pin 21 OFF
+  pinMode(22, OUTPUT);
+  digitalWrite(22, LOW);  // Pin 22 OFF
 
   // Init display at standard 20 MHz (using HSPI native pins)
   if (!gfx->begin(20000000)) {
@@ -417,7 +419,8 @@ void setup() {
   gfx->setRotation(1);  // landscape 320×240
 
   // Backlight ON
-  digitalWrite(TFT_BL, LOW);   // LOW = ON
+  digitalWrite(21, LOW);   // Pin 21 ON (active-LOW)
+  digitalWrite(22, HIGH);  // Pin 22 ON (active-HIGH)
   Serial.println("[BOOT] Backlight ON");
 
   // Brief red flash proves display + backlight are working
