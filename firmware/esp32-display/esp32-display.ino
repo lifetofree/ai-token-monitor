@@ -465,6 +465,31 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  // ── Backlight Diagnostic Test ──────────────────────────────────────────────
+  static unsigned long lastTest = 0;
+  static int testState = 0;
+  static const int testPins[] = {21, 22, 27, 32};
+  static const int numPins = 4;
+  
+  if (now - lastTest >= 2000) {
+    lastTest = now;
+    testState = (testState + 1) % (numPins * 2);
+    int activePin = testPins[testState / 2];
+    bool activeLevel = (testState % 2 == 0) ? HIGH : LOW;
+    
+    // Set all other test pins to LOW to avoid conflicts
+    for (int i = 0; i < numPins; i++) {
+      if (testPins[i] != activePin) {
+        pinMode(testPins[i], OUTPUT);
+        digitalWrite(testPins[i], LOW);
+      }
+    }
+    
+    pinMode(activePin, OUTPUT);
+    digitalWrite(activePin, activeLevel);
+    Serial.printf("[DIAGNOSTIC] Backlight Test: Pin %d is %s\n", activePin, activeLevel ? "HIGH" : "LOW");
+  }
+
   // ── WiFi reconnect (non-blocking) ──────────────────────────────────────────
   if (WiFi.status() != WL_CONNECTED) {
     if (now - lastWifiRetry >= WIFI_RETRY_MS) {
