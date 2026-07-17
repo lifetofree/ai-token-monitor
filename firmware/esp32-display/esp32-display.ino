@@ -35,7 +35,7 @@
 #define TFT_CLK   14
 #define TFT_CS    15
 #define TFT_DC    2
-#define TFT_RST   4    // reset pin on standard ESP32-2432S028R
+#define TFT_RST   -1   // reset pin tied to ESP32 EN
 #define TFT_BL    21   // active HIGH on standard ESP32-2432S028R (GPIO 21)
 
 #if USE_TOUCH
