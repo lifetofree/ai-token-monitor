@@ -35,7 +35,7 @@
 #define TFT_CS    15
 #define TFT_DC    2
 #define TFT_RST   -1   // tied to ESP32 EN
-#define TFT_BL    32   // active HIGH on yellow PCB
+#define TFT_BL    21   // active HIGH on standard ESP32-2432S028R (GPIO 21)
 
 #if USE_TOUCH
 #define T_IRQ   27
