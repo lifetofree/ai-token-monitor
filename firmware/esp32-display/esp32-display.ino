@@ -1,10 +1,16 @@
 // =====================================================================
-// AI Token Monitor — ESP32-2432S028R firmware (ILI9341 320x240, SPI)
+// AI Token Monitor — ESP32 Cheap Yellow Display 3.5" firmware
 //
-// Board pin map (ESP32-2432S028R — "Cheap Yellow Display" / CYD):
-//   TFT_MISO  = 12    TFT_MOSI = 13    TFT_CLK = 14
-//   TFT_CS    = 15    TFT_DC   = 2     TFT_RST = 4
-//   TFT_BL    = 21    (Backlight, active HIGH: HIGH = ON, LOW = OFF)
+// Board: Sunton ESP32-3248S035R (ESP32-WROOM-32 + ST7796 480x320 over SPI
+// + XPT2046 resistive touch sharing the same SPI bus via a separate CS).
+// Pin mapping verified against rzeldent/platformio-espressif32-sunton
+// (esp32-3248S035R.json) — NOT 8-bit parallel, despite this board also
+// being sold under the generic "CYD 3.5\"" name alongside parallel variants.
+//
+// SPI pin map:
+//   SCLK=14  MOSI=13  MISO=12
+//   TFT_CS=15  TFT_DC=2  TFT_RST=not connected  TFT_BL=27 (active HIGH)
+//   XPT2046 touch (shares SCLK/MOSI/MISO): T_CS=33  T_IRQ=36
 // =====================================================================
 
 #include <WiFi.h>
@@ -16,38 +22,46 @@
 #include <time.h>
 #include <stdlib.h>
 
-#define USE_TOUCH 0   // 1 = enable XPT2046 resistive touch
+#define USE_TOUCH 0   // 1 = enable XPT2046 resistive touch — kept OFF: touch shares
+                      // SCLK/MOSI/MISO with the display, and xpt2046_init() calling
+                      // SPIClass(HSPI).begin() on those pins re-routes the ESP32 GPIO
+                      // matrix away from VSPI, which Arduino_ESP32SPI only attaches
+                      // once in begin() and never re-asserts — permanently breaking
+                      // all display writes after touch init (confirmed against the
+                      // GFX_Library_for_Arduino source: see Arduino_ESP32SPI.cpp).
+                      // Re-enabling needs a software bit-bang touch driver that
+                      // doesn't reclaim the pins via SPIClass/pinMode(OUTPUT), and
+                      // that hasn't been written or tested on hardware yet.
 
 #include "secrets.h"  // WIFI_SSID, WIFI_PASS, FIREBASE_HOST, FIREBASE_AUTH
 #ifndef WIFI_PASSWORD
   #define WIFI_PASSWORD WIFI_PASS
 #endif
 
-// ─── Pin config ────────────────────────────────────────────────────────────────
-#define TFT_MISO  12
-#define TFT_MOSI  13
-#define TFT_CLK   14
-#define TFT_CS    15
+// ─── Pin config (SPI — ST7796 controller) ───────────────────────────────────────
+#define TFT_SCLK 14
+#define TFT_MOSI 13
+#define TFT_MISO 12
+#define TFT_CS   15
 #define TFT_DC    2
-#define TFT_RST   4    // Reset pin (shared with RGB Red LED)
-#define TFT_BL    21   // Backlight control (active HIGH: HIGH = ON, LOW = OFF)
+#define TFT_RST  -1   // not connected on this board
+#define TFT_BL   27   // active HIGH
 
 #if USE_TOUCH
-#define T_IRQ   27
-#define T_MOSI  32
-#define T_MISO  39
-#define T_CLK   25
-#define T_CS    33
+#define T_CS    33    // XPT2046 chip select (dedicated)
+#define T_IRQ   36    // Touch interrupt
+#define T_MOSI  13    // shares display SPI bus
+#define T_MISO  12    // shares display SPI bus
+#define T_CLK   14    // shares display SPI bus
 #endif
 
-#define SCREEN_W 320
-#define SCREEN_H 240
+#define SCREEN_W 480
+#define SCREEN_H 320
 
-// ─── Display ───────────────────────────────────────────────────────────────────
-Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_CLK, TFT_MOSI,
-                                            TFT_MISO, HSPI);
-Arduino_GFX   *gfx  = new Arduino_ILI9341(bus, TFT_RST, 0 /*rot*/, false,
-                                           240, 320);
+// ─── Display (SPI ST7796) ────────────────────────────────────────────────────────
+Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, TFT_MISO);
+// ST7796 native is 320x480 portrait; setRotation(1) in setup() gives us 480x320
+Arduino_GFX   *gfx  = new Arduino_ST7796(bus, TFT_RST, 0 /*rot*/, false);
 
 // ─── Colours (RGB565) ──────────────────────────────────────────────────────────
 #define C_BG        0x0841   // #080810  dark background
@@ -78,37 +92,81 @@ static const int NUM_AI = 4;
 AIData      aiData[NUM_AI];
 const char *aiKeys[NUM_AI] = {"gemini", "claude", "minimax", "glm"};
 
-// ─── Layout constants (landscape 320x240) ──────────────────────────────────────
-#define HDR_H   26
-#define FTR_H   20
-#define FTR_Y   (SCREEN_H - FTR_H)       // 220
-#define CARD_X  6
-#define CARD_Y  (HDR_H + 4)              // 30
-#define CARD_W  (SCREEN_W - CARD_X * 2)  // 308
-#define CARD_H  (FTR_Y - CARD_Y - 4)     // 186
-#define CARD_R  8
-#define BAR_H   10
-#define CW1     6     // char pixel width at textSize(1)
-#define CW2     12    // textSize(2)
-#define CW3     18    // textSize(3)
+// ─── Layout constants (landscape 480x320) ──────────────────────────────────────
+#define HDR_H   36
+#define FTR_H   28
+#define FTR_Y   (SCREEN_H - FTR_H)       // 292
+#define CARD_GAP 6
+#define CARD_X_START 8
+#define CARD_Y_START (HDR_H + 4)         // 40
+#define CARD_W      ((SCREEN_W - CARD_X_START * 2 - CARD_GAP) / 2)  // 232
+#define CARD_H      ((FTR_Y - CARD_Y_START - CARD_GAP) / 2)            // 121
+#define CARD_R      10
+#define BAR_H       12
+#define CW1         6     // char pixel width at textSize(1)
+#define CW2         12    // textSize(2)
+#define CW3         18    // textSize(3)
 
 // ─── State ─────────────────────────────────────────────────────────────────────
-int          currentIndex     = 0;
 bool         dataFetched      = false;
 bool         wifiEverConn     = false;
 
 unsigned long lastRefresh     = 0;
 unsigned long lastClockTick   = 0;
-unsigned long lastRotateTick  = 0;
 unsigned long lastWifiRetry   = 0;
 
 const unsigned long REFRESH_MS    = 30000;  // Firebase poll interval
 const unsigned long CLOCK_MS      = 1000;
-const unsigned long ROTATE_MS     = 5000;
 const unsigned long WIFI_RETRY_MS = 5000;
 
 String clockText = "--:--";
 String dateText  = "--- --";
+
+#if USE_TOUCH
+// ─── XPT2046 Touch Driver (resistive, SPI) ─────────────────────────────────────
+SPIClass touchSPI(HSPI);
+
+bool xpt2046_init() {
+  pinMode(T_CS, OUTPUT);
+  digitalWrite(T_CS, HIGH);
+  if (T_IRQ >= 0) pinMode(T_IRQ, INPUT_PULLUP);
+  touchSPI.begin(T_CLK, T_MISO, T_MOSI, T_CS);
+  return true;
+}
+
+static uint16_t xpt2046_read(uint8_t cmd) {
+  digitalWrite(T_CS, LOW);
+  touchSPI.transfer(cmd);
+  uint16_t v = ((uint16_t)touchSPI.transfer(0) << 8) | touchSPI.transfer(0);
+  digitalWrite(T_CS, HIGH);
+  return v >> 3;  // 12-bit value
+}
+
+bool xpt2046_read_xy(int *outX, int *outY) {
+  if (T_IRQ >= 0 && digitalRead(T_IRQ) == HIGH) return false;
+
+  int x = 0, y = 0, valid = 0;
+  for (int i = 0; i < 4; i++) {
+    uint16_t xr = xpt2046_read(0xD0);  // X channel
+    uint16_t yr = xpt2046_read(0x90);  // Y channel
+    if (xr > 50 && xr < 4000 && yr > 50 && yr < 4000) {
+      x += xr; y += yr; valid++;
+    }
+  }
+  if (valid == 0) return false;
+  x /= valid; y /= valid;
+
+  // CYD 3.5" XPT2046: raw X/Y are rotated 90 deg relative to landscape
+  int sx = 4095 - y;
+  int sy = x;
+  if (sx < 0) sx = 0; if (sx >= SCREEN_W) sx = SCREEN_W - 1;
+  if (sy < 0) sy = 0; if (sy >= SCREEN_H) sy = SCREEN_H - 1;
+
+  *outX = sx;
+  *outY = sy;
+  return true;
+}
+#endif
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 int clampPct(int v) { return v < 0 ? 0 : (v > 100 ? 100 : v); }
@@ -201,112 +259,101 @@ void refreshClock() {
 // ─── Screens ───────────────────────────────────────────────────────────────────
 void drawHeader() {
   gfx->fillRect(0, 0, SCREEN_W, HDR_H, C_CARD);
-  gfx->drawFastHLine(0, HDR_H-1, SCREEN_W, C_BORDER);
+  gfx->drawFastHLine(0, HDR_H - 1, SCREEN_W, C_BORDER);
 
-  gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor(8, 8); gfx->print(dateText);
+  gfx->setTextSize(2); gfx->setTextColor(C_MUTED);
+  gfx->setCursor(12, 10); gfx->print(dateText);
 
-  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
-  gfx->setCursor((SCREEN_W - (int)clockText.length() * CW2) / 2, 4);
-  gfx->print(clockText);
+  gfx->setTextSize(3); gfx->setTextColor(C_WHITE);
+  int clockW = (int)clockText.length() * CW3;
+  gfx->setCursor((SCREEN_W - clockW) / 2, 2); gfx->print(clockText);
 
-  drawWiFi(SCREEN_W - 32, 6);
+  drawWiFi(SCREEN_W - 32, 10);
 }
 
 void drawFooter() {
   gfx->fillRect(0, FTR_Y, SCREEN_W, FTR_H, C_CARD);
   gfx->drawFastHLine(0, FTR_Y, SCREEN_W, C_BORDER);
   gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor(8, FTR_Y + 6);
-  gfx->printf("%d/%d  %s", currentIndex+1, NUM_AI,
-               dataFetched ? "auto-rotate 5s" : "waiting data...");
+  gfx->setCursor(12, FTR_Y + 10);
+  gfx->printf("AI Token Monitor  •  %d brands  •  %s",
+              NUM_AI,
+              dataFetched ? "live" : "waiting data...");
+  gfx->setCursor(SCREEN_W - 12 - 6 * CW1, FTR_Y + 10);
+  gfx->print(WiFi.status() == WL_CONNECTED ? "WiFi OK" : "WiFi x");
 }
 
-void drawBrandCard(const AIData &d, int idx) {
-  int x = CARD_X, y = CARD_Y, w = CARD_W, h = CARD_H;
+void drawBrandCard(int x, int y, int w, int h, const AIData &d) {
   int ix = x + 12, iw = w - 24;
 
-  // Card background + border
   gfx->fillRoundRect(x, y, w, h, CARD_R, C_CARD);
   gfx->drawRoundRect(x, y, w, h, CARD_R, C_BORDER);
-
-  // Top colour stripe
-  gfx->fillRect(x, y, w, 4, d.brand_color);
-
-  // ── Brand name (size 2)
-  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
-  gfx->setCursor(ix, y + 12); gfx->print(d.name);
-
-  // Page indicator  (top-right)
-  char pg[8]; sprintf(pg, "%d/%d", idx+1, NUM_AI);
-  gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor(x + w - 12 - (int)strlen(pg) * CW1, y + 16);
-  gfx->print(pg);
+  gfx->fillRect(x, y + 6, 4, h - 12, d.brand_color);
 
   int pct5h = calcRemainingPct(d.quota5h);
   int pctWk = calcRemainingPct(d.quotaWeekly);
   char pctBuf[8];
 
-  // ── 5-Hour block ──────────────────────────────────────────────────────────
-  int y5 = y + 44;
+  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
+  gfx->setCursor(ix, y + 6); gfx->print(d.name);
 
-  gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor(ix, y5); gfx->print("5-HOUR");
-
-  // Big percentage (right-aligned)
   sprintf(pctBuf, "%d%%", pct5h);
-  gfx->setTextSize(3); gfx->setTextColor(barColor(pct5h, d.brand_color));
-  gfx->setCursor(ix + iw - (int)strlen(pctBuf) * CW3, y5 - 8);
-  gfx->print(pctBuf);
+  gfx->setTextColor(barColor(pct5h, d.brand_color));
+  int pctW = (int)strlen(pctBuf) * CW2;
+  gfx->setCursor(ix + iw - pctW, y + 6); gfx->print(pctBuf);
 
-  // Progress bar
-  drawBar(ix, y5 + 8, iw, BAR_H, pct5h, d.brand_color);
-
-  // Reset row
-  gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor(ix, y5 + 24);
-  gfx->print("5h "); gfx->print(fmtReset(d.quota5h.reset_at));
-  String in5h = "in " + fmtCountdown(d.quota5h.reset_at);
-  gfx->setCursor(ix + iw - (int)in5h.length() * CW1, y5 + 24);
-  gfx->print(in5h);
-
-  // ── Weekly block ──────────────────────────────────────────────────────────
-  int yWk = y + 110;
+  drawBar(ix, y + 28, iw, BAR_H, pct5h, d.brand_color);
 
   gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor(ix, yWk); gfx->print("WEEKLY");
+  gfx->setCursor(ix, y + 46); gfx->print("WEEKLY");
 
+  gfx->setTextSize(2);
   sprintf(pctBuf, "%d%%", pctWk);
-  gfx->setTextSize(3); gfx->setTextColor(barColor(pctWk, d.brand_color));
-  gfx->setCursor(ix + iw - (int)strlen(pctBuf) * CW3, yWk - 8);
-  gfx->print(pctBuf);
+  gfx->setTextColor(barColor(pctWk, d.brand_color));
+  pctW = (int)strlen(pctBuf) * CW2;
+  gfx->setCursor(ix + iw - pctW, y + 46); gfx->print(pctBuf);
 
-  drawBar(ix, yWk + 8, iw, BAR_H, pctWk, d.brand_color);
+  drawBar(ix, y + 68, iw, BAR_H, pctWk, d.brand_color);
 
   gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor(ix, yWk + 24);
+  gfx->setCursor(ix, y + 88);
+  gfx->print("5h reset "); gfx->print(fmtReset(d.quota5h.reset_at));
+  String in5h = "in " + fmtCountdown(d.quota5h.reset_at);
+  int inW = (int)in5h.length() * CW1;
+  gfx->setCursor(ix + iw - inW, y + 88); gfx->print(in5h);
+
+  gfx->setCursor(ix, y + 102);
   gfx->print("wk "); gfx->print(fmtResetDay(d.quotaWeekly.reset_at));
   String inWk = "in " + fmtCountdown(d.quotaWeekly.reset_at);
-  gfx->setCursor(ix + iw - (int)inWk.length() * CW1, yWk + 24);
-  gfx->print(inWk);
+  inW = (int)inWk.length() * CW1;
+  gfx->setCursor(ix + iw - inW, y + 102); gfx->print(inWk);
 }
 
-void drawCurrent() {
+void drawGrid() {
   gfx->fillScreen(C_BG);
   drawHeader();
-  drawBrandCard(aiData[currentIndex], currentIndex);
+
+  for (int row = 0; row < 2; row++) {
+    int y = CARD_Y_START + row * (CARD_H + CARD_GAP);
+    for (int col = 0; col < 2; col++) {
+      int x = CARD_X_START + col * (CARD_W + CARD_GAP);
+      int idx = row * 2 + col;
+      drawBrandCard(x, y, CARD_W, CARD_H, aiData[idx]);
+    }
+  }
+
   drawFooter();
 }
 
 void drawLoading(const String &msg) {
   gfx->fillScreen(C_BG);
-  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
-  int tw = 16 * CW2;  // "AI Token Monitor"
-  gfx->setCursor((SCREEN_W - tw) / 2, 80); gfx->print("AI Token Monitor");
+  gfx->setTextSize(3); gfx->setTextColor(C_WHITE);
+  int tw = 14 * CW3;
+  gfx->setCursor((SCREEN_W - tw) / 2, 110); gfx->print("AI Token Monitor");
+  gfx->setTextSize(2); gfx->setTextColor(C_MUTED);
+  gfx->setCursor((SCREEN_W - (int)msg.length() * CW2) / 2, 160); gfx->print(msg);
   gfx->setTextSize(1); gfx->setTextColor(C_MUTED);
-  gfx->setCursor((SCREEN_W - (int)msg.length() * CW1) / 2, 120);
-  gfx->print(msg);
-  gfx->setCursor(60, 140); gfx->print("ESP32-2432S028R  ILI9341 320x240");
+  gfx->setCursor((SCREEN_W - 32 * CW1) / 2, 200); gfx->print("ESP32 CYD 3.5\"  ST7796 480x320");
 }
 
 // ─── Firebase fetch ────────────────────────────────────────────────────────────
@@ -344,11 +391,9 @@ void fetchFromFirebase() {
     long long sp5   = jsonInt64(json, pfx + "spend_pct5h");
     long long spW   = jsonInt64(json, pfx + "spend_pct_weekly");
 
-    // Firebase stores ms timestamps; convert to seconds
     if (rat  > 100000000000LL) rat  /= 1000;
     if (ratW > 100000000000LL) ratW /= 1000;
 
-    // Sanity-clamp timestamps (reject bogus far-future values)
     time_t ntp = time(nullptr);
     if (ntp > 1000000000L) {
       long long cap = (long long)ntp + 90LL * 86400;
@@ -359,7 +404,6 @@ void fetchFromFirebase() {
     String unit = "not_exposed";
     if (json.get(jd, (pfx + "unit").c_str())) unit = jd.stringValue;
 
-    // ── 5-Hour quota
     if (unit == "percent" && rem >= 0 && rem <= 100) {
       aiData[i].quota5h = {100 - rem, 100, rem, rat};
     } else if (unit == "requests" && lim > 0 && rem >= 0) {
@@ -370,7 +414,6 @@ void fetchFromFirebase() {
       aiData[i].quota5h = {sp5, 100, r, rat};
     }
 
-    // ── Weekly quota
     if (wrem >= 0 && wrem <= 100) {
       aiData[i].quotaWeekly = {100 - wrem, 100, wrem, ratW};
     } else {
@@ -398,19 +441,21 @@ void wifiConnect() {
 void setup() {
   Serial.begin(115200);
   delay(800);
-  Serial.println("\n=== AI Token Monitor — ESP32-2432S028R ===");
+  Serial.println("\n=== AI Token Monitor — ESP32 CYD 3.5\" ===");
 
-  // Backlight OFF during initialization (avoid flash) - active HIGH pin 21
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, LOW); // LOW = OFF
+  // Backlight OFF during initialization (avoid flash) - active HIGH
+  pinMode(TFT_BL, OUTPUT);      digitalWrite(TFT_BL, LOW);
 
-  // Init display at standard 20 MHz over HSPI native channel
-  if (!gfx->begin(20000000)) {
+  // Init display (SPI, ST7796) at 24 MHz (matches the board's documented max SPI clock)
+  Serial.println("[DISP] init SPI...");
+  if (!gfx->begin(24000000)) {
     Serial.println("[ERROR] gfx->begin() failed — check wiring");
+  } else {
+    Serial.println("[DISP] gfx->begin() OK");
   }
-  gfx->setRotation(1);  // landscape 320x240
+  gfx->setRotation(1);  // 480x320 landscape (panel native is 320x480 portrait)
 
-  // Backlight ON (HIGH = ON)
+  // Backlight ON
   digitalWrite(TFT_BL, HIGH);
   Serial.println("[BOOT] Backlight ON");
 
@@ -419,7 +464,12 @@ void setup() {
   delay(400);
   gfx->fillScreen(C_BG);
 
-  // Default brand labels (shown before first Firebase fetch)
+#if USE_TOUCH
+  if (xpt2046_init()) {
+    Serial.println("[TOUCH] XPT2046 ready");
+  }
+#endif
+
   aiData[0] = {"Antigravity", BRAND_GEMINI,  {0,100,0,0}, {0,100,0,0}};
   aiData[1] = {"Claude",      BRAND_CLAUDE,  {0,100,0,0}, {0,100,0,0}};
   aiData[2] = {"MiniMax",     BRAND_MINIMAX, {0,100,0,0}, {0,100,0,0}};
@@ -446,12 +496,11 @@ void setup() {
   }
 
   unsigned long now = millis();
-  lastRefresh    = now;
-  lastClockTick  = now;
-  lastRotateTick = now;
-  lastWifiRetry  = now;
+  lastRefresh   = now;
+  lastClockTick = now;
+  lastWifiRetry = now;
 
-  if (dataFetched) drawCurrent();
+  if (dataFetched) drawGrid();
   Serial.println("[BOOT] Setup complete.");
 }
 
@@ -459,47 +508,49 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // ── WiFi reconnect (non-blocking) ──────────────────────────────────────────
   if (WiFi.status() != WL_CONNECTED) {
     if (now - lastWifiRetry >= WIFI_RETRY_MS) {
       lastWifiRetry = now;
       wifiConnect();
     }
-    if (!wifiEverConn) return;  // no data yet, nothing to draw
+    if (!wifiEverConn) return;
   } else if (!wifiEverConn) {
-    // Just connected for the first time in loop
     wifiEverConn = true;
     configTime(25200, 0, "pool.ntp.org", "time.nist.gov");
     time_t nt = time(nullptr);
     for (int i = 0; nt < 1000000000L && i < 20; i++) { delay(500); nt = time(nullptr); }
     refreshClock();
     fetchFromFirebase();
-    if (dataFetched) drawCurrent();
+    if (dataFetched) drawGrid();
     lastRefresh = now;
   }
 
-  // ── Firebase refresh every 30s ─────────────────────────────────────────────
   if (now - lastRefresh >= REFRESH_MS) {
     lastRefresh = now;
     fetchFromFirebase();
-    if (dataFetched) drawCurrent();
-    return;  // skip rotate this tick
+    if (dataFetched) drawGrid();
+    return;
   }
 
-  // ── Clock refresh every 1s ─────────────────────────────────────────────────
   if (now - lastClockTick >= CLOCK_MS) {
     lastClockTick = now;
     String prevClock = clockText, prevDate = dateText;
     refreshClock();
     if (dataFetched && (clockText != prevClock || dateText != prevDate)) {
-      drawHeader();  // only re-draw header strip (avoids full flicker)
+      drawGrid();
     }
   }
 
-  // ── Auto-rotate every 5s ──────────────────────────────────────────────────
-  if (dataFetched && now - lastRotateTick >= ROTATE_MS) {
-    lastRotateTick = now;
-    currentIndex = (currentIndex + 1) % NUM_AI;
-    drawCurrent();
+#if USE_TOUCH
+  int tx, ty;
+  static bool wasTouching = false;
+  if (xpt2046_read_xy(&tx, &ty)) {
+    if (!wasTouching) {
+      wasTouching = true;
+      Serial.printf("[TOUCH] down x=%d y=%d\n", tx, ty);
+    }
+  } else {
+    wasTouching = false;
   }
+#endif
 }

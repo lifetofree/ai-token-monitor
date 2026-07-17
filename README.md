@@ -91,14 +91,13 @@ Coding-agent sessions (Antigravity CLI in particular) record input / output / ca
 The parser lives in [`lib/antigravity-parser.js`](./lib/antigravity-parser.js) and is unit-tested in `tests/antigravityParser.test.js` (13 cases). **When `GEMINI_API_KEY` is set in `.env`, each unique string is counted via the Gemini `countTokens` API with a process-local cache; otherwise the standard `~4 chars / token` heuristic is used.** On boot the server reads `GEMINI_API_KEY` from `.env` and hands it to the parser so the real-counting path activates without a restart. The `lib/antigravity-context.js` helper resolves the active-session context window against a 1M-token default (overridable via `GEMINI_CONTEXT_WINDOW`) and surfaces it as the `contextWindow` field of the `/api/agent-usage` response. The parser never modifies the source files.
 
 ### 5. ESP32 Color-TFT Companion Display
-A separate Arduino sketch (`firmware/esp32-display/esp32-display.ino`) renders a full-color brand card on a **240×280 ST7789 TFT** (1.69"):
-- Button on **GPIO 25**: **short press** cycles brands (1/4 → 2/4 → …), **long press** toggles auto-rotate (5 s/page).
-- Each page is a **web-dashboard-style card** with:
-  - **Header stripe** in the brand's color (Indigo / Orange / Cyan / Green — matches `styles.css` dark-mode palette)
-  - **Brand name** + page indicator (`1/4`) + WiFi signal bars
-  - **5-HOUR QUOTA** section — large remaining %, animated progress bar, 3-column stat row (`Used% / Left% / Total%`), reset absolute time + countdown
-  - **WEEKLY QUOTA** section — same layout
-  - **Footer**: `[press pin 25 to swap]`
+A separate Arduino sketch (`firmware/esp32-display/esp32-display.ino`) renders all four brands at once on a **Sunton ESP32-3248S035R** ("Cheap Yellow Display" 3.5", ST7796 480×320 landscape, SPI — not the 8-bit-parallel variant sold under the same generic name):
+- Pin map: `TFT_SCLK=14`, `TFT_MOSI=13`, `TFT_MISO=12`, `TFT_CS=15`, `TFT_DC=2`, `TFT_RST=-1` (not connected), `TFT_BL=27` (active HIGH). SPI clock 24 MHz.
+- `USE_TOUCH` is `0` by default and should stay that way: the XPT2046 resistive touch shares `SCLK`/`MOSI`/`MISO` with the display, and initializing it via `SPIClass(HSPI).begin()` re-routes those pins' GPIO-matrix attachment away from the display's VSPI bus. `Arduino_ESP32SPI` only attaches that routing once, in `begin()`, and never reasserts it — so enabling touch permanently breaks every display write for the rest of the session. Supporting touch on this board needs a software bit-bang XPT2046 driver that avoids reclaiming the shared pins; that hasn't been written yet.
+- Layout is a static **2×2 grid** — all four brands visible simultaneously, no paging:
+  - **Header**: date, large NTP-synced clock (UTC+7), WiFi signal bars
+  - Each **brand card**: name, **5-HOUR QUOTA** (remaining %, progress bar, absolute reset + countdown), **WEEKLY QUOTA** (same, with day-of-week prefix)
+  - **Footer**: brand count + `live`/`waiting data...` status, WiFi status
 - Brand colors match the web dashboard CSS dark-mode custom properties (RGB565 equivalents):
 
   | Brand | Web `--color-*` (dark) | ESP32 RGB565 |
@@ -108,7 +107,7 @@ A separate Arduino sketch (`firmware/esp32-display/esp32-display.ino`) renders a
   | MiniMax | `#22d3ee` | `0x269D` |
   | GLM | `#4ade80` | `0x4EF0` |
 
-- Polls Firebase `/display.json/quotas` every 30 s; `lib/firebase.js` PUTs after every `seedBrandQuotas()` pass. Reset timestamps are written in **seconds** (converted from JS ms) so `time(nullptr)` comparisons are exact.
+- Polls Firebase `/display/quotas.json` every 30 s; `lib/firebase.js`'s `publishToFirebase()` PUTs to `/display.json` after each quota refresh. Reset timestamps are written in **seconds** (converted from JS ms) so `time(nullptr)` comparisons are exact.
 - Progress bar % and reset times match the web dashboard: `spend_pct5h` / `spend_pct_weekly` for brands without a native token quota; provider `remaining` / `limit_value` for GLM and MiniMax; absolute time via NTP (UTC+7, Bangkok).
 - Requires NTP sync for the absolute clock column; until then, the column shows `--:--` while the relative countdown still ticks.
 - Upload at **115200 baud** — CH340 clone chips drop bytes at 921600.
